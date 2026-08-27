@@ -56,14 +56,17 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.handleTextGenerationResult
 import me.rerere.ai.ui.metadataAs
 import me.rerere.ai.ui.toMetadata
+import me.rerere.ai.util.HttpException
 import me.rerere.ai.util.KeyRoulette
 import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.encodeBase64
 import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
 import me.rerere.ai.util.parseErrorDetail
+import me.rerere.ai.util.redactSecrets
 import me.rerere.ai.util.stringSafe
 import me.rerere.ai.util.toHeaders
+import me.rerere.common.android.Logging
 import me.rerere.common.http.await
 import me.rerere.common.http.jsonPrimitiveOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -239,6 +242,26 @@ private fun TokenUsage?.sum(other: TokenUsage?): TokenUsage? {
     )
 }
 
+// Minimax's /anthropic/v1/models returns `{"data": null}` (and the OpenAI-shape
+// /v1/models returns `{"object":"","data":null}`) even with a valid API key,
+// despite their public OpenAPI spec documenting the OpenAI-compat list shape.
+// The endpoint is effectively unimplemented on their side. Surface their
+// documented model lineup in the "Available Models" picker so users can pick
+// which one(s) to add — the list is RETURNED FROM listModels, not seeded into
+// the user's saved provider state.
+//
+// Source: https://platform.minimax.io/docs/api-reference/models/openai/list-models
+// + the published model table on the Minimax models page.
+private val MINIMAX_FALLBACK_MODELS = listOf(
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "MiniMax-M2.5",
+    "MiniMax-M2.5-highspeed",
+    "MiniMax-M2.1",
+    "MiniMax-M2.1-highspeed",
+    "MiniMax-M2",
+).map { Model(modelId = it, displayName = it) }
+
 class ClaudeProvider(private val client: OkHttpClient, context: Context? = null) : Provider<ProviderSetting.Claude> {
     private val keyRoulette = if (context != null) KeyRoulette.lru(context) else KeyRoulette.default()
 
@@ -252,13 +275,36 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                 .build()
 
             val response = client.newCall(request).execute()
+            val bodyStr = response.body.string()
             if (!response.isSuccessful) {
-                error("Failed to get models: ${response.code} ${response.body?.string()}")
+                error("Failed to get models: ${response.code} $bodyStr")
             }
 
-            val bodyStr = response.body?.string() ?: ""
             val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
-            val data = bodyJson["data"]?.jsonArray ?: return@withContext emptyList()
+            // `as? JsonArray` handles both an absent `data` key (Kotlin null)
+            // and a JSON `null` value (JsonNull, which is a non-null Kotlin
+            // object that throws if you call `.jsonArray` on it). The latter
+            // surfaces e.g. when a user mis-types a Claude-shape provider at
+            // an OpenAI URL like https://api.minimax.io/v1 — Minimax responds
+            // 200 with `{"base_resp": {...}}` and we'd crash here otherwise.
+            val data = bodyJson["data"] as? JsonArray
+            if (data == null) {
+                val baseResp = bodyJson["base_resp"] as? JsonObject
+                val statusCode = baseResp?.get("status_code")?.jsonPrimitive?.intOrNull
+                if (statusCode != null && statusCode != 0) {
+                    val msg = baseResp["status_msg"]?.jsonPrimitive?.contentOrNull
+                    error("Failed to get models: ${msg ?: "status_code=$statusCode"}")
+                }
+                val errMsg = (bodyJson["error"] as? JsonObject)?.get("message")
+                    ?.jsonPrimitive?.contentOrNull
+                if (errMsg != null) {
+                    error("Failed to get models: $errMsg")
+                }
+                if (providerSetting.baseUrl.contains("api.minimax.io", ignoreCase = true)) {
+                    return@withContext MINIMAX_FALLBACK_MODELS
+                }
+                return@withContext emptyList()
+            }
 
             data.mapNotNull { modelJson ->
                 val modelObj = modelJson.jsonObject
@@ -304,14 +350,16 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "generateText: ${json.encodeToString(requestBody)}")
+        if (Logging.isDebugLoggingEnabled()) {
+            Log.i(TAG, "generateText: ${json.encodeToString(redactSecrets(requestBody))}")
+        }
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body?.string()}")
+            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
         }
 
-        val bodyStr = response.body?.string() ?: ""
+        val bodyStr = response.body.string()
         val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
 
         // 从 JsonObject 中提取必要的信息
@@ -354,10 +402,12 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        if (Logging.isDebugLoggingEnabled()) {
+            Log.i(TAG, "streamText: ${json.encodeToString(redactSecrets(requestBody))}")
 
-        requestBody["messages"]!!.jsonArray.forEach {
-            Log.i(TAG, "streamText: $it")
+            requestBody["messages"]!!.jsonArray.forEach {
+                Log.i(TAG, "streamText: ${redactSecrets(it)}")
+            }
         }
 
         val decoder = ClaudeStreamDecoder()
@@ -382,16 +432,20 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                     val result = decoder.accept(SseEvent(id = id, event = type, data = data))
                     sendChunks(result.chunks)
                     if (result.completed) close()
-                } catch (e: Throwable) {
+                } catch (e: HttpException) {
                     close(e)
+                } catch (e: Throwable) {
+                    // A single malformed/unparseable chunk must not escape this callback:
+                    // an uncaught exception here propagates through OkHttp's SSE reader and
+                    // aborts the whole stream instead of just skipping this one line.
+                    Log.w(TAG, "onEvent: skipping malformed chunk (${e.message})", e)
                 }
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 var exception = t
 
-                t?.printStackTrace()
-                Log.e(TAG, "onFailure: ${t?.javaClass?.name} ${t?.message} / $response")
+                Log.e(TAG, "onFailure: ${t?.javaClass?.name} ${t?.message} / $response", t)
 
                 val bodyRaw = response?.body?.stringSafe()
                 try {
@@ -401,8 +455,7 @@ class ClaudeProvider(private val client: OkHttpClient, context: Context? = null)
                         exception = bodyElement.parseErrorDetail()
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw")
-                    e.printStackTrace()
+                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw", e)
                 } finally {
                     close(exception)
                 }

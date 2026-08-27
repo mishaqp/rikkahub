@@ -136,6 +136,7 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
         }
     }
 
+    @Suppress("DEPRECATION")  // LocalWindowInfo replaces this in a future Compose bump
     val windowAdaptiveInfo = currentWindowDpSize()
     val isBigScreen =
         windowAdaptiveInfo.width > windowAdaptiveInfo.height && windowAdaptiveInfo.width >= 1100.dp
@@ -282,6 +283,7 @@ private fun ChatPageContent(
 ) {
     val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
+    val context = LocalContext.current
     val workspaceRepository: WorkspaceRepository = koinInject()
     var previewMode by rememberSaveable { mutableStateOf(false) }
     val hazeState = rememberHazeState()
@@ -369,7 +371,10 @@ private fun ChatPageContent(
                     },
                     onSendClick = {
                         if (currentChatModel == null) {
-                            toaster.show("请先选择模型", type = ToastType.Error)
+                            toaster.show(
+                                context.getString(R.string.chat_select_model_first),
+                                type = ToastType.Error,
+                            )
                             return@ChatInput
                         }
                         if (inputState.isEditing()) {
@@ -491,11 +496,14 @@ private fun ChatPageContent(
                         chatListState.requestScrollToItem(index)
                     }
                 },
-                onToolApproval = { toolCallId, approved, reason ->
-                    vm.handleToolApproval(toolCallId, approved, reason)
+                onToolApproval = { toolCallId, approved, reason, scope, toolName ->
+                    vm.handleToolApproval(toolCallId, approved, reason, scope, toolName)
                 },
                 onToolAnswer = { toolCallId, answer ->
                     vm.handleToolAnswer(toolCallId, answer)
+                },
+                onRerunTool = { toolCallId ->
+                    vm.rerunTool(toolCallId)
                 },
                 onToggleFavorite = { node ->
                     vm.toggleMessageFavorite(node)
@@ -751,7 +759,7 @@ private fun TopBar(
                         scope.launch { drawerState.open() }
                     }
                 ) {
-                    Icon(HugeIcons.Menu03, "Messages")
+                    Icon(HugeIcons.Menu03, stringResource(R.string.accessibility_messages))
                 }
             }
         },
@@ -797,7 +805,7 @@ private fun TopBar(
                     onClickMenu()
                 }
             ) {
-                Icon(if (previewMode) HugeIcons.Cancel01 else HugeIcons.LeftToRightListBullet, "Chat Options")
+                Icon(if (previewMode) HugeIcons.Cancel01 else HugeIcons.LeftToRightListBullet, stringResource(R.string.accessibility_chat_options))
             }
 
             IconButton(
@@ -805,7 +813,7 @@ private fun TopBar(
                     onNewChat()
                 }
             ) {
-                Icon(HugeIcons.MessageAdd01, "New Message")
+                Icon(HugeIcons.MessageAdd01, stringResource(R.string.chat_page_new_message))
             }
         },
     )

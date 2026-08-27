@@ -7,46 +7,49 @@ import android.widget.Toast
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import me.rerere.common.http.await
-import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.BuildConfig
+import me.rerere.rikkahub.R
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-private const val API_URL = "https://updates.rikka-ai.com/"
-
 class UpdateChecker(
     private val client: OkHttpClient,
-    appScope: AppScope,
+    private val apiUrl: String = BuildConfig.UPDATE_API_URL,
+    private val currentVersionName: String = BuildConfig.VERSION_NAME,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
-    val updateState: StateFlow<UiState<UpdateInfo>> = checkUpdate().stateIn(
-        scope = appScope,
-        started = SharingStarted.Lazily,
-        initialValue = UiState.Loading,
-    )
-
-    private fun checkUpdate(): Flow<UiState<UpdateInfo>> = flow {
+    fun checkUpdate(): Flow<UiState<UpdateInfo>> = flow {
         emit(UiState.Loading)
+        if (apiUrl.isBlank()) {
+            emit(
+                UiState.Success(
+                    UpdateInfo(
+                        version = currentVersionName,
+                        publishedAt = "",
+                        changelog = "",
+                        downloads = emptyList()
+                    )
+                )
+            )
+            return@flow
+        }
         emit(
             UiState.Success(
                 data = try {
                     val response = client.newCall(
                         Request.Builder()
-                            .url(API_URL)
+                            .url(apiUrl)
                             .get()
                             .addHeader(
                                 "User-Agent",
-                                "RikkaHub ${BuildConfig.VERSION_NAME} #${BuildConfig.VERSION_CODE}"
+                                "RikkaHub $currentVersionName #${BuildConfig.VERSION_CODE}"
                             )
                             .build()
                     ).await()
@@ -69,7 +72,7 @@ class UpdateChecker(
             val request = DownloadManager.Request(download.url.toUri()).apply {
                 // 设置下载时通知栏的标题和描述
                 setTitle(download.name)
-                setDescription("正在下载更新包...")
+                setDescription(context.getString(R.string.update_download_description))
                 // 下载完成后通知栏可见
                 setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 // 允许在移动网络和WiFi下下载

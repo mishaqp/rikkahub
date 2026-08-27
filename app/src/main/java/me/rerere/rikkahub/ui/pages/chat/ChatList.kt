@@ -131,8 +131,9 @@ fun ChatList(
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)? = null,
     onClearTranslation: (UIMessage) -> Unit = {},
     onJumpToMessage: (Int) -> Unit = {},
-    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
+    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    onRerunTool: (suspend (toolCallId: String) -> me.rerere.rikkahub.service.ChatService.RerunToolResult)? = null,
     onToggleFavorite: ((MessageNode) -> Unit)? = null,
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
 ) {
@@ -175,6 +176,7 @@ fun ChatList(
                 animatedVisibilityScope = this@AnimatedContent,
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
+                onRerunTool = onRerunTool,
                 onToggleFavorite = onToggleFavorite,
                 onConversationSystemPromptChange = onConversationSystemPromptChange,
             )
@@ -203,8 +205,9 @@ private fun ChatListNormal(
     onTranslate: ((UIMessage, java.util.Locale) -> Unit)?,
     onClearTranslation: (UIMessage) -> Unit,
     animatedVisibilityScope: AnimatedVisibilityScope,
-    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
+    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    onRerunTool: (suspend (toolCallId: String) -> me.rerere.rikkahub.service.ChatService.RerunToolResult)? = null,
     onToggleFavorite: ((MessageNode) -> Unit)? = null,
     onConversationSystemPromptChange: ((String?) -> Unit)? = null,
 ) {
@@ -268,7 +271,10 @@ private fun ChatListNormal(
             .flatMap { it.models }
             .associateBy { it.id }
     }
-    val lastMessageIndex = conversation.messageNodes.lastIndex
+    val displayGroups = remember(conversation.messageNodes) {
+        conversation.messageNodes.groupAutomaticCompactionMessages()
+    }
+    val lastMessageNodeId = conversation.messageNodes.lastOrNull()?.id
 
     Box(
         modifier = Modifier
@@ -281,8 +287,11 @@ private fun ChatListNormal(
                     // println("is bottom = ${visibleItemsInfo.isAtBottom()}, scroll = ${state.isScrollInProgress}, can_scroll = ${state.canScrollForward}, loading = $loading")
                     if (!state.isScrollInProgress && loadingState) {
                         if (visibleItemsInfo.isAtBottom()) {
-                            state.requestScrollToItem(conversationUpdated.messageNodes.lastIndex + 10)
-                            // Log.i(TAG, "ChatList: scroll to ${conversationUpdated.messageNodes.lastIndex}")
+                            val latestGroupIndex = conversationUpdated.messageNodes
+                                .groupAutomaticCompactionMessages()
+                                .lastIndex
+                            state.requestScrollToItem(latestGroupIndex + 10)
+                            // Log.i(TAG, "ChatList: scroll to $latestGroupIndex")
                         }
                     }
                 }
@@ -312,18 +321,19 @@ private fun ChatListNormal(
                     .hazeSource(state = hazeState)
                     .padding(top = innerPadding.calculateTopPadding()),
             ) {
-            itemsIndexed(
-                items = conversation.messageNodes,
-                key = { index, item -> item.id },
-            ) { index, node ->
+            items(
+                items = displayGroups,
+                key = { it.id },
+            ) { group ->
+                val node = group.terminalNode
                 Column {
                     ListSelectableItem(
-                        key = node.id,
+                        key = group.id,
                         onSelectChange = {
-                            if (!selectedItems.contains(node.id)) {
-                                selectedItems.add(node.id)
+                            if (group.nodes.any { it.id !in selectedItems }) {
+                                selectedItems.addAll(group.nodes.map { it.id }.filterNot(selectedItems::contains))
                             } else {
-                                selectedItems.remove(node.id)
+                                selectedItems.removeAll(group.nodes.map { it.id }.toSet())
                             }
                         },
                         selectedKeys = selectedItems,
@@ -331,9 +341,15 @@ private fun ChatListNormal(
                     ) {
                         ChatMessage(
                             node = node,
+                            displayMessage = group.displayMessage,
                             model = node.currentMessage.modelId?.let(modelById::get),
                             assistant = assistant,
-                            loading = loading && index == lastMessageIndex,
+                            loading = loading && node.id == lastMessageNodeId,
+                            // Un-narrowed: whether ANY generation is running in this
+                            // conversation, not just one targeting this message - the
+                            // rerun button in an older message's tool-call sheet must stay
+                            // hidden while a newer message is still streaming.
+                            generationActive = loading,
                             onRegenerate = {
                                 onRegenerate(node.currentMessage)
                             },
@@ -363,7 +379,8 @@ private fun ChatListNormal(
                             onClearTranslation = onClearTranslation,
                             onToolApproval = onToolApproval,
                             onToolAnswer = onToolAnswer,
-                            lastMessage = index == lastMessageIndex,
+                            onRerunTool = onRerunTool,
+                            lastMessage = node.id == lastMessageNodeId,
                         )
                     }
                 }
@@ -605,7 +622,10 @@ private fun ChatListPreview(
     var searchQuery by remember { mutableStateOf("") }
 
     // 过滤消息，同时保留原始 index 避免后续 O(n) indexOf 查找
-    val filteredMessages = remember(conversation.messageNodes, searchQuery) {
+    // Key by node-count + last-node id to avoid list-reference comparison on every recomp.
+    val nodesKey = conversation.messageNodes.size.toString() +
+        (conversation.messageNodes.lastOrNull()?.id?.toString() ?: "")
+    val filteredMessages = remember(nodesKey, searchQuery) {
         if (searchQuery.isBlank()) {
             conversation.messageNodes.mapIndexed { index, node -> index to node }
         } else {
@@ -640,7 +660,7 @@ private fun ChatListPreview(
                     IconButton(onClick = { searchQuery = "" }) {
                         Icon(
                             imageVector = HugeIcons.Cancel01,
-                            contentDescription = "Clear",
+                            contentDescription = stringResource(R.string.accessibility_clear_text),
                             modifier = Modifier.size(20.dp)
                         )
                     }

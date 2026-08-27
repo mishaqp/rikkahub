@@ -295,11 +295,29 @@ class WorkspaceDocumentsProvider : DocumentsProvider() {
         require(documentId.startsWith(DOC_PREFIX)) { "Invalid documentId: $documentId" }
         val rest = documentId.removePrefix(DOC_PREFIX)
         val idx = rest.indexOf('/')
-        return if (idx < 0) {
-            DocId(isRoot = false, root = rest, relPath = "")
-        } else {
-            DocId(isRoot = false, root = rest.substring(0, idx), relPath = rest.substring(idx + 1))
-        }
+        val root = if (idx < 0) rest else rest.substring(0, idx)
+        val relPath = if (idx < 0) "" else rest.substring(idx + 1)
+        requireValidRoot(root)
+        return DocId(isRoot = false, root = root, relPath = relPath)
+    }
+
+    /**
+     * Validate the workspace [root] segment parsed from an UNTRUSTED documentId (this provider
+     * is reachable by other apps via SAF) before it reaches [WorkspaceManager.filesDir], which
+     * resolves it as File(baseDir, root). Without this a crafted documentId like
+     * "ws/../databases/..." makes filesDir() escape the workspaces base directory; the relPath
+     * guard in [resolveFile] only constrains relPath and anchors to whatever base the root
+     * produced, so it cannot catch a malicious root. Reject any path-significant character and
+     * require the root to name a real workspace.
+     */
+    private fun requireValidRoot(root: String) {
+        require(
+            root.isNotBlank() &&
+                root != "." && root != ".." &&
+                !root.contains('/') && !root.contains('\\') &&
+                !root.contains("..") && !root.contains(' ')
+        ) { "Invalid workspace root" }
+        require(allWorkspaces().any { it.root == root }) { "Unknown workspace: $root" }
     }
 
     private fun buildDocId(root: String, relPath: String): String =

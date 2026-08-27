@@ -10,14 +10,21 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.ai.core.InputSchema
 import me.rerere.search.SearchResult.SearchResultItem
 import me.rerere.search.SearchService.Companion.httpClient
 import me.rerere.search.SearchService.Companion.json
+import me.rerere.search.extract.ExtractMode
+import me.rerere.search.extract.ScrapeSchema
+import me.rerere.search.extract.WebExtractor
+import me.rerere.search.net.hostIsBlockedLiteral
+import me.rerere.search.net.withEgressGuard
 import okhttp3.Credentials
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import java.net.URLEncoder
 
@@ -43,7 +50,20 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
             required = listOf("query")
         )
 
-    override fun scrapingParameters(options: SearchServiceOptions.SearXNGOptions): InputSchema? = null
+    override fun scrapingParameters(options: SearchServiceOptions.SearXNGOptions): InputSchema? =
+        InputSchema.Obj(
+            properties = buildJsonObject {
+                put("url", buildJsonObject {
+                    put("type", "string")
+                    put("description", ScrapeSchema.URL_DESCRIPTION)
+                })
+                put("mode", buildJsonObject {
+                    put("type", "string")
+                    put("description", ScrapeSchema.MODE_DESCRIPTION)
+                })
+            },
+            required = listOf("url"),
+        )
 
     override suspend fun search(
         params: JsonObject,
@@ -93,8 +113,7 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
                 val searchResponse = runCatching {
                     json.decodeFromString<SearXNGResponse>(bodyRaw)
                 }.onFailure {
-                    it.printStackTrace()
-                    println("SearXNG response body: $bodyRaw")
+                    Log.e(TAG, "Failed to decode SearXNG response: $bodyRaw", it)
                     error("Failed to decode SearXNG response: ${it.message}")
                 }.getOrThrow()
 
@@ -111,8 +130,8 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
 
                 return@withContext Result.success(SearchResult(items = items))
             } else {
-                val errorBody = response.body?.string()
-                println("SearXNG API error: ${response.code} - $errorBody")
+                val errorBody = response.body.string()
+                Log.e(TAG, "SearXNG API error: ${response.code} - $errorBody")
                 error("SearXNG request failed with status ${response.code}")
             }
         }
@@ -122,8 +141,58 @@ object SearXNGService : SearchService<SearchServiceOptions.SearXNGOptions> {
         params: JsonObject,
         commonOptions: SearchCommonOptions,
         serviceOptions: SearchServiceOptions.SearXNGOptions
-    ): Result<ScrapedResult> {
-        return Result.failure(Exception("Scraping is not supported for SearXNG"))
+    ): Result<ScrapedResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val url = params["url"]?.jsonPrimitive?.contentOrNull?.trim()
+            require(!url.isNullOrBlank()) { "url is required" }
+            require(url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)) {
+                "url must be an absolute http(s) URL"
+            }
+            require(!hostIsBlockedLiteral(url.toHttpUrlOrNull()?.host)) {
+                "blocked_private_address: $url"
+            }
+            val mode = when (params["mode"]?.jsonPrimitive?.contentOrNull?.lowercase()) {
+                "text" -> ExtractMode.TEXT
+                "links" -> ExtractMode.LINKS
+                "metadata" -> ExtractMode.METADATA
+                else -> ExtractMode.ARTICLE
+            }
+
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", ScrapeSchema.DEFAULT_USER_AGENT)
+                .get()
+                .build()
+
+            val guarded = httpClient.withEgressGuard()
+            guarded.newCall(request).execute().use { resp ->
+                require(resp.isSuccessful) { "HTTP ${resp.code} from $url" }
+                val html = boundedBody(resp, SCRAPE_BODY_CAP)
+                val page = WebExtractor.extract(
+                    html = html,
+                    baseUrl = url,
+                    mode = mode,
+                    maxChars = 32 * 1024,
+                    startIndex = 0,
+                )
+                require(page.text.isNotBlank() || mode != ExtractMode.ARTICLE) {
+                    "no readable content extracted from $url"
+                }
+                ScrapedResult(
+                    urls = listOf(
+                        ScrapedResultUrl(
+                            url = url,
+                            content = page.text,
+                            metadata = ScrapedResultMetadata(
+                                title = page.title,
+                                description = page.description,
+                                language = page.language,
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
     }
 
 

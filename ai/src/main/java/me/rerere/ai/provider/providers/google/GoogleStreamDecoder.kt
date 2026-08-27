@@ -1,5 +1,6 @@
 package me.rerere.ai.provider.providers.google
 
+import android.util.Log
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -21,6 +22,8 @@ import me.rerere.ai.ui.toMetadata
 import me.rerere.ai.util.json
 import me.rerere.common.http.jsonPrimitiveOrNull
 import kotlin.time.Clock
+
+private const val TAG = "GoogleStreamDecoder"
 
 internal class GoogleStreamDecoder(
     private val responseId: String,
@@ -61,15 +64,22 @@ internal class GoogleStreamDecoder(
 
     private fun parseMessage(content: JsonObject, groundingMetadata: JsonObject?): UIMessage = UIMessage(
         role = MessageRole.ASSISTANT,
-        parts = content["parts"]?.jsonArray?.map { parsePart(it.jsonObject) }.orEmpty(),
+        parts = content["parts"]?.jsonArray?.mapNotNull { parsePart(it.jsonObject) }.orEmpty(),
         annotations = parseAnnotations(groundingMetadata),
     )
 
-    private fun parsePart(part: JsonObject): UIMessagePart = when {
+    private fun parsePart(part: JsonObject): UIMessagePart? = when {
         part.containsKey("text") -> {
             val text = part["text"]?.jsonPrimitive?.contentOrNull ?: ""
             if (part["thought"]?.jsonPrimitive?.booleanOrNull == true) {
-                UIMessagePart.Reasoning(text, Clock.System.now(), null)
+                val thoughtSignature = part["thoughtSignature"]?.jsonPrimitive?.contentOrNull
+                UIMessagePart.Reasoning(
+                    reasoning = text,
+                    createdAt = Clock.System.now(),
+                    metadata = thoughtSignature?.let {
+                        GoogleThoughtMetadata(thoughtSignature = it).toMetadata()
+                    },
+                )
             } else {
                 UIMessagePart.Text(text)
             }
@@ -101,7 +111,10 @@ internal class GoogleStreamDecoder(
                 )
             }
         }
-        else -> error("unknown message part type: $part")
+        else -> {
+            Log.w(TAG, "parsePart: skipping unrecognized part, keys=${part.keys}")
+            null
+        }
     }
 
     private fun parseAnnotations(metadata: JsonObject?): List<UIMessageAnnotation> =

@@ -1,5 +1,6 @@
 package me.rerere.search
 
+import android.util.Log
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.text.LinkAnnotation
@@ -21,6 +22,8 @@ import me.rerere.search.SearchService.Companion.json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+
+private const val TAG = "MetasoSearchService"
 
 object MetasoSearchService : SearchService<SearchServiceOptions.MetasoOptions> {
     override val name: String = "Metaso"
@@ -73,12 +76,11 @@ object MetasoSearchService : SearchService<SearchServiceOptions.MetasoOptions> {
 
             val response = httpClient.newCall(request).await()
             if (response.isSuccessful) {
-                val bodyRaw = response.body?.string() ?: error("Failed to get response body")
+                val bodyRaw = response.body.string()
                 val searchResponse = runCatching {
                     json.decodeFromString<MetasoSearchResponse>(bodyRaw)
                 }.onFailure {
-                    it.printStackTrace()
-                    println("Failed to decode Metaso response: $bodyRaw")
+                    Log.e(TAG, "Failed to decode Metaso response: $bodyRaw", it)
                     error("Failed to decode response: $bodyRaw")
                 }.getOrThrow()
 
@@ -94,8 +96,8 @@ object MetasoSearchService : SearchService<SearchServiceOptions.MetasoOptions> {
                     )
                 )
             } else {
-                val errorBody = response.body?.string()
-                println("Metaso search failed with code ${response.code}: $errorBody")
+                val errorBody = response.body.string()
+                Log.e(TAG, "Metaso search failed with code ${response.code}: $errorBody")
                 error("Search request failed with code ${response.code}: $errorBody")
             }
         }

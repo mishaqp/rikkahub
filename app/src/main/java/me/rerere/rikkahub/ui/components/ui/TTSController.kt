@@ -17,8 +17,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -38,13 +38,15 @@ import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.hooks.CustomTtsState
 import me.rerere.tts.model.PlaybackState
 import me.rerere.tts.model.PlaybackStatus
+import androidx.compose.ui.res.stringResource
+import me.rerere.rikkahub.R
 
 @Composable
 fun TTSController() {
     val ttsState = LocalTTSState.current
     val toaster = LocalToaster.current
 
-    val isSpeaking by ttsState.isSpeaking.collectAsState()
+    val isSpeaking by ttsState.isSpeaking.collectAsStateWithLifecycle()
     var isVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(ttsState, toaster) {
@@ -66,7 +68,7 @@ fun TTSController() {
         tag = "tts_controller",
         visibility = isVisible
     ) {
-        val playbackState by ttsState.playbackState.collectAsState()
+        val playbackState by ttsState.playbackState.collectAsStateWithLifecycle()
         var expand by remember { mutableStateOf(false) }
         Surface(
             shape = CircleShape,
@@ -90,7 +92,7 @@ fun TTSController() {
                 ) {
                     Icon(
                         imageVector = HugeIcons.Cancel01,
-                        contentDescription = null,
+                        contentDescription = stringResource(R.string.accessibility_tts_close),
                     )
                 }
 
@@ -112,7 +114,7 @@ fun TTSController() {
                 ) {
                     Icon(
                         imageVector = if (expand) HugeIcons.ArrowLeft01 else HugeIcons.ArrowRight01,
-                        contentDescription = null,
+                        contentDescription = stringResource(if (expand) R.string.accessibility_tts_collapse else R.string.accessibility_tts_expand),
                     )
                 }
             }
@@ -129,7 +131,7 @@ private fun FastForwardButton(ttsState: CustomTtsState) {
     ) {
         Icon(
             imageVector = HugeIcons.Forward02,
-            contentDescription = null,
+            contentDescription = stringResource(R.string.accessibility_tts_fast_forward),
         )
     }
 }

@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,11 +73,15 @@ fun TranslatorPage(vm: TranslatorVM = koinViewModel()) {
     val clipboard = LocalClipboard.current
     val toaster = LocalToaster.current
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     // 处理错误
     LaunchedEffect(Unit) {
         vm.errorFlow.collect { error ->
-            toaster.show(error.message ?: "错误", type = ToastType.Error)
+            toaster.show(
+                error.message ?: context.getString(R.string.translator_error_generic),
+                type = ToastType.Error,
+            )
         }
     }
 
@@ -152,7 +157,7 @@ fun TranslatorPage(vm: TranslatorVM = koinViewModel()) {
                     }
                 ) {
                     Icon(HugeIcons.Clipboard, null)
-                    Text("粘贴文本", modifier = Modifier.padding(start = 4.dp))
+                    Text(stringResource(R.string.translator_paste_text), modifier = Modifier.padding(start = 4.dp))
                 }
             }
 
@@ -197,7 +202,7 @@ fun TranslatorPage(vm: TranslatorVM = koinViewModel()) {
                     }
                 ) {
                     Icon(HugeIcons.Clipboard, null)
-                    Text("复制翻译结果", modifier = Modifier.padding(start = 4.dp))
+                    Text(stringResource(R.string.translator_copy_result), modifier = Modifier.padding(start = 4.dp))
                 }
             }
         }
@@ -214,7 +219,10 @@ private val Locales by lazy {
         Locale.FRENCH,
         Locale.GERMAN,
         Locale.ITALIAN,
-        Locale("es", "ES")
+        Locale.forLanguageTag("es-ES"),
+        Locale.forLanguageTag("ar"),
+        Locale.forLanguageTag("fa"),
+        Locale.forLanguageTag("ur")
     )
 }
 
@@ -236,7 +244,10 @@ private fun LanguageSelector(
             Locale.FRENCH -> stringResource(R.string.language_french)
             Locale.GERMAN -> stringResource(R.string.language_german)
             Locale.ITALIAN -> stringResource(R.string.language_italian)
-            Locale("es", "ES") -> stringResource(R.string.language_spanish)
+            Locale.forLanguageTag("es-ES") -> stringResource(R.string.language_spanish)
+            Locale.forLanguageTag("ar") -> stringResource(R.string.language_arabic)
+            Locale.forLanguageTag("fa") -> stringResource(R.string.language_persian)
+            Locale.forLanguageTag("ur") -> stringResource(R.string.language_urdu)
             else -> locale.getDisplayLanguage(Locale.getDefault())
         }
     }

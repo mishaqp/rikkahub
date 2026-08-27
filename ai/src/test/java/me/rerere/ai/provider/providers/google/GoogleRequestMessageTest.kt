@@ -1,10 +1,21 @@
 package me.rerere.ai.provider.providers.google
 
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.core.ReasoningLevel
+import me.rerere.ai.core.Tool
+import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.ModelAbility
+import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import okhttp3.OkHttpClient
@@ -40,6 +51,22 @@ class GoogleRequestMessageTest {
         )
         method.isAccessible = true
         return method.invoke(provider, messages) as JsonArray
+    }
+
+    private fun invokeBuildCompletionRequestBody(
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+    ): JsonObject {
+        // Reflection pins the exact signature, so the safety-category list has to be passed
+        // explicitly: Kotlin compiles the default away into a separate synthetic overload.
+        val method = GoogleProvider::class.java.getDeclaredMethod(
+            "buildCompletionRequestBody",
+            List::class.java,
+            TextGenerationParams::class.java,
+            List::class.java
+        )
+        method.isAccessible = true
+        return method.invoke(provider, messages, params, GOOGLE_SAFETY_CATEGORIES) as JsonObject
     }
 
     @Test
@@ -99,6 +126,20 @@ class GoogleRequestMessageTest {
         // Verify functionResponse contents
         assertEquals("search", functionResponses[0]["name"]?.jsonPrimitive?.content)
         assertEquals("calculate", functionResponses[1]["name"]?.jsonPrimitive?.content)
+
+        // Every functionCall/functionResponse must carry a non-blank id, and the ids must
+        // pair up per tool call (call_1 -> search, call_2 -> calculate) - see issue #26.
+        val callIds = functionCalls.map { it["id"]?.jsonPrimitive?.content }
+        val responseIds = functionResponses.map { it["id"]?.jsonPrimitive?.content }
+        callIds.forEach { assertTrue("functionCall id should be non-blank", !it.isNullOrBlank()) }
+        responseIds.forEach { assertTrue("functionResponse id should be non-blank", !it.isNullOrBlank()) }
+        assertEquals("call_1", callIds[0])
+        assertEquals("call_2", callIds[1])
+        assertEquals(
+            "functionCall and functionResponse ids should pair up per tool call",
+            callIds,
+            responseIds
+        )
     }
 
     @Test
@@ -413,6 +454,228 @@ class GoogleRequestMessageTest {
             response?.containsKey("result") == true)
         assertTrue("Result should contain expected output",
             response?.get("result")?.jsonPrimitive?.content?.contains("Expected output value") == true)
+    }
+
+    @Test
+    fun `system prompt text should be serialized into Gemini system instruction`() {
+        val prompt = "Assistant prompt\n\nTool guidance"
+        val messages = listOf(
+            UIMessage.system(prompt),
+            UIMessage.user("hello")
+        )
+        val params = TextGenerationParams(
+            model = Model(modelId = "gemini-test", abilities = listOf(ModelAbility.REASONING))
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+        val systemInstruction = request["systemInstruction"]!!.jsonObject
+        val parts = systemInstruction["parts"]!!.jsonArray
+        assertEquals(prompt, parts.single().jsonObject["text"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `Gemini 3 series models send the canonical uppercase thinkingLevel for each ReasoningLevel`() {
+        // The v1beta discovery document and both official SDKs (@google/genai, python-genai)
+        // serialize thinkingLevel as the uppercase proto enum name.
+        val expected = mapOf(
+            ReasoningLevel.OFF to "MINIMAL",
+            ReasoningLevel.LOW to "LOW",
+            ReasoningLevel.MEDIUM to "MEDIUM",
+            ReasoningLevel.HIGH to "HIGH",
+            ReasoningLevel.XHIGH to "HIGH",
+        )
+
+        for ((level, thinkingLevel) in expected) {
+            val messages = listOf(UIMessage.user("hello"))
+            val params = TextGenerationParams(
+                model = Model(
+                    modelId = "gemini-3-pro-preview",
+                    abilities = listOf(ModelAbility.REASONING)
+                ),
+                reasoningLevel = level,
+            )
+
+            val request = invokeBuildCompletionRequestBody(messages, params)
+            val thinkingConfig = request["generationConfig"]!!.jsonObject["thinkingConfig"]!!.jsonObject
+
+            assertEquals(
+                "ReasoningLevel.$level should map to thinkingLevel \"$thinkingLevel\"",
+                thinkingLevel,
+                thinkingConfig["thinkingLevel"]?.jsonPrimitive?.content
+            )
+        }
+    }
+
+    @Test
+    fun `AUTO reasoning level omits thinkingLevel for Gemini 3 series models`() {
+        val messages = listOf(UIMessage.user("hello"))
+        val params = TextGenerationParams(
+            model = Model(
+                modelId = "gemini-3-pro-preview",
+                abilities = listOf(ModelAbility.REASONING)
+            ),
+            reasoningLevel = ReasoningLevel.AUTO,
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+        val thinkingConfig = request["generationConfig"]!!.jsonObject["thinkingConfig"]!!.jsonObject
+
+        assertTrue(
+            "AUTO must not emit a thinkingLevel key",
+            !thinkingConfig.containsKey("thinkingLevel")
+        )
+    }
+
+    @Test
+    fun `function tools and model built-in tools should both land in the tools array`() {
+        // Regression for the "tools" key being written twice: put("tools", ...) on a
+        // JsonObjectBuilder replaces the existing key outright, so a model with a
+        // built-in tool (e.g. Search) enabled alongside caller-supplied function tools
+        // used to silently drop every function declaration.
+        val messages = listOf(UIMessage.user("hello"))
+        val params = TextGenerationParams(
+            model = Model(
+                modelId = "gemini-test",
+                abilities = listOf(ModelAbility.TOOL),
+                tools = setOf(BuiltInTools.Search),
+            ),
+            tools = listOf(
+                Tool(
+                    name = "my_tool",
+                    description = "a function tool",
+                    execute = { emptyList() },
+                )
+            ),
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+        val toolsArray = request["tools"]!!.jsonArray
+
+        val hasFunctionDeclarations = toolsArray.any { it.jsonObject.containsKey("functionDeclarations") }
+        val hasGoogleSearch = toolsArray.any { it.jsonObject.containsKey("googleSearch") }
+
+        assertTrue("function tools must survive alongside built-in tools", hasFunctionDeclarations)
+        assertTrue("built-in tools must still be present", hasGoogleSearch)
+    }
+
+    @Test
+    fun `function tool parameters are sanitized to the Gemini schema allowlist`() {
+        val messages = listOf(UIMessage.user("hello"))
+        val params = TextGenerationParams(
+            model = Model(modelId = "gemini-test", abilities = listOf(ModelAbility.TOOL)),
+            tools = listOf(
+                Tool(
+                    name = "search",
+                    description = "a function tool with a JSON-Schema-only key",
+                    parameters = {
+                        InputSchema.Obj(
+                            properties = buildJsonObject {
+                                put("query", buildJsonObject {
+                                    put("type", "string")
+                                    put("x-google-identifier", "should be stripped")
+                                })
+                            }
+                        )
+                    },
+                    execute = { emptyList() },
+                )
+            ),
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+        val declaration = request["tools"]!!.jsonArray.first()
+            .jsonObject["functionDeclarations"]!!.jsonArray.single().jsonObject
+        val queryProperty = declaration["parameters"]!!.jsonObject["properties"]!!
+            .jsonObject["query"]!!.jsonObject
+
+        assertEquals("string", queryProperty["type"]?.jsonPrimitive?.content)
+        assertTrue(
+            "unknown vendor keys must not reach Google",
+            queryProperty["x-google-identifier"] == null
+        )
+    }
+
+    @Test
+    fun `a tool with no parameters omits the parameters key entirely`() {
+        val messages = listOf(UIMessage.user("hello"))
+        val params = TextGenerationParams(
+            model = Model(modelId = "gemini-test", abilities = listOf(ModelAbility.TOOL)),
+            tools = listOf(
+                Tool(
+                    name = "no_args",
+                    description = "a tool that takes no arguments",
+                    execute = { emptyList() },
+                )
+            ),
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+        val declaration = request["tools"]!!.jsonArray.first()
+            .jsonObject["functionDeclarations"]!!.jsonArray.single().jsonObject
+
+        assertTrue(
+            "parameters key must be omitted, not emitted as JSON null",
+            !declaration.containsKey("parameters")
+        )
+    }
+
+    @Test
+    fun `toolConfig includeServerSideToolInvocations is set when function and built-in tools are mixed`() {
+        val messages = listOf(UIMessage.user("hello"))
+        val params = TextGenerationParams(
+            model = Model(
+                modelId = "gemini-test",
+                abilities = listOf(ModelAbility.TOOL),
+                tools = setOf(BuiltInTools.Search),
+            ),
+            tools = listOf(
+                Tool(
+                    name = "my_tool",
+                    description = "a function tool",
+                    execute = { emptyList() },
+                )
+            ),
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+        val toolConfig = request["toolConfig"]!!.jsonObject
+
+        assertTrue(toolConfig["includeServerSideToolInvocations"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `toolConfig is absent when only function tools are present`() {
+        val messages = listOf(UIMessage.user("hello"))
+        val params = TextGenerationParams(
+            model = Model(modelId = "gemini-test", abilities = listOf(ModelAbility.TOOL)),
+            tools = listOf(
+                Tool(
+                    name = "my_tool",
+                    description = "a function tool",
+                    execute = { emptyList() },
+                )
+            ),
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+
+        assertTrue("toolConfig must be absent with only function tools", request["toolConfig"] == null)
+    }
+
+    @Test
+    fun `toolConfig is absent when only built-in tools are present`() {
+        val messages = listOf(UIMessage.user("hello"))
+        val params = TextGenerationParams(
+            model = Model(
+                modelId = "gemini-test",
+                abilities = listOf(ModelAbility.TOOL),
+                tools = setOf(BuiltInTools.Search),
+            ),
+        )
+
+        val request = invokeBuildCompletionRequestBody(messages, params)
+
+        assertTrue("toolConfig must be absent with only built-in tools", request["toolConfig"] == null)
     }
 
     // ==================== Helper Functions ====================

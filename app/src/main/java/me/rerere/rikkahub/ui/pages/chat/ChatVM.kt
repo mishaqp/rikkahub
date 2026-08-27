@@ -11,7 +11,6 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.firebase.analytics.FirebaseAnalytics
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,7 +56,6 @@ class ChatVM(
     private val conversationRepo: ConversationRepository,
     private val chatService: ChatService,
     val updateChecker: UpdateChecker,
-    private val analytics: FirebaseAnalytics,
     private val filesManager: FilesManager,
     private val favoriteRepository: FavoriteRepository,
 ) : ViewModel() {
@@ -190,14 +188,12 @@ class ChatVM(
      */
     fun handleMessageSend(content: List<UIMessagePart>,answer: Boolean = true) {
         if (content.isEmptyInputMessage()) return
-        analytics.logEvent("ai_send_message", null)
 
         chatService.sendMessage(_conversationId, content, answer)
     }
 
     fun handleMessageEdit(parts: List<UIMessagePart>, messageId: Uuid) {
         if (parts.isEmptyInputMessage()) return
-        analytics.logEvent("ai_edit_message", null)
 
         viewModelScope.launch {
             chatService.editMessage(_conversationId, messageId, parts)
@@ -205,17 +201,13 @@ class ChatVM(
     }
 
     fun handleCompressContext(additionalPrompt: String, targetTokens: Int, keepRecentMessages: Int): Job {
-        return viewModelScope.launch {
-            chatService.compressConversation(
-                _conversationId,
-                conversation.value,
-                additionalPrompt,
-                targetTokens,
-                keepRecentMessages
-            ).onFailure {
-                chatService.addError(it, title = context.getString(R.string.error_title_compress_conversation))
-            }
-        }
+        return chatService.compressConversationAsync(
+            conversationId = _conversationId,
+            conversation = conversation.value,
+            additionalPrompt = additionalPrompt,
+            targetTokens = targetTokens,
+            keepRecentMessages = keepRecentMessages,
+        )
     }
 
     suspend fun forkMessage(message: UIMessage): Conversation {
@@ -230,7 +222,7 @@ class ChatVM(
 
     fun showDeleteBlockedWhileGeneratingError() {
         chatService.addError(
-            error = IllegalStateException("请先停止生成再删除消息"),
+            error = IllegalStateException(context.getString(R.string.chat_stop_generation_before_delete)),
             conversationId = _conversationId,
             title = context.getString(R.string.error_title_operation)
         )
@@ -240,26 +232,36 @@ class ChatVM(
         message: UIMessage,
         regenerateAssistantMsg: Boolean = true
     ) {
-        analytics.logEvent("ai_regenerate_at_message", null)
         chatService.regenerateAtMessage(_conversationId, message, regenerateAssistantMsg)
     }
 
     fun handleToolApproval(
         toolCallId: String,
         approved: Boolean,
-        reason: String = ""
+        reason: String = "",
+        scope: me.rerere.rikkahub.service.ChatService.ApprovalScope =
+            me.rerere.rikkahub.service.ChatService.ApprovalScope.Once,
+        toolName: String? = null,
     ) {
-        analytics.logEvent("ai_tool_approval", null)
-        chatService.handleToolApproval(_conversationId, toolCallId, approved, reason)
+        chatService.handleToolApproval(
+            conversationId = _conversationId,
+            toolCallId = toolCallId,
+            approved = approved,
+            reason = reason,
+            scope = scope,
+            toolName = toolName,
+        )
     }
 
     fun handleToolAnswer(
         toolCallId: String,
         answer: String,
     ) {
-        analytics.logEvent("ai_tool_answer", null)
         chatService.handleToolApproval(_conversationId, toolCallId, approved = true, answer = answer)
     }
+
+    suspend fun rerunTool(toolCallId: String): me.rerere.rikkahub.service.ChatService.RerunToolResult =
+        chatService.rerunTool(_conversationId, toolCallId)
 
     fun stopGeneration() {
         viewModelScope.launch {
@@ -294,11 +296,18 @@ class ChatVM(
     fun moveConversationToAssistant(conversation: Conversation, targetAssistantId: Uuid) {
         viewModelScope.launch {
             val conversationFull = conversationRepo.getConversationById(conversation.id) ?: return@launch
-            // 文件夹是助手内分组，切换助手后原文件夹在新助手下不可见，需清空归属避免会话丢失
+            // Folders are per-assistant groupings; after switching assistant the old folder is
+            // not visible under the new one, so clear the assignment to avoid losing the chat.
             val updatedConversation = conversationFull.copy(
                 assistantId = targetAssistantId,
                 folderId = null,
             )
+            // Drop any "Allow for this chat" grants the user gave the previous assistant.
+            // The grants apply to a tool surface the new assistant may use very differently
+            // (different prompt, different tool list), and the user authorised them under
+            // the old persona's behaviour, not this one's. Persistent "Always Allow" grants
+            // stay (they were granted globally) but ChatScope is reset.
+            me.rerere.rikkahub.data.ai.tools.ToolApprovalAllowList.clearChat(conversation.id)
             if (conversation.id == _conversationId) {
                 chatService.saveConversation(_conversationId, updatedConversation)
                 settingsStore.updateAssistant(targetAssistantId)

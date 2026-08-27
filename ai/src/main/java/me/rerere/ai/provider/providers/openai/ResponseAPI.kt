@@ -1,6 +1,7 @@
 package me.rerere.ai.provider.providers.openai
 
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.onFailure
@@ -26,6 +27,7 @@ import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
 import me.rerere.ai.provider.ProviderSetting
@@ -51,8 +53,10 @@ import me.rerere.ai.util.encodeBase64
 import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
 import me.rerere.ai.util.parseErrorDetail
+import me.rerere.ai.util.redactSecrets
 import me.rerere.ai.util.stringSafe
 import me.rerere.ai.util.toHeaders
+import me.rerere.common.android.Logging
 import me.rerere.common.http.await
 import me.rerere.common.http.jsonObjectOrNull
 import me.rerere.common.http.jsonPrimitiveOrNull
@@ -65,9 +69,116 @@ import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Clock
 
 private const val TAG = "ResponseAPI"
+private val USER_CANCELLATION_MARKERS = listOf(
+    "canceled by user",
+    "cancelled by user",
+    "user_canceled",
+    "user_cancelled",
+)
+
+private fun isCancellationFailure(failure: Throwable): Boolean =
+    generateSequence(failure) { it.cause }
+        .take(8)
+        .any { cause ->
+            cause is CancellationException ||
+                USER_CANCELLATION_MARKERS.any { marker ->
+                    cause.message?.contains(marker, ignoreCase = true) == true
+                }
+        }
+
+/**
+ * A transport failure from a Response API stream. The output marker protects callers from
+ * replaying a request after text or a tool call has already reached the conversation.
+ */
+internal class ResponseStreamFailureException(
+    val receivedMeaningfulOutput: Boolean,
+    message: String,
+    cause: Throwable? = null,
+) : IOException(message, cause)
+
+/**
+ * A provider-side Response API error delivered as an SSE event. These errors are already a
+ * complete business response, so replaying the exact same request is both noisy and harmful
+ * (a context-length error, for example, can never succeed without changing the input).
+ */
+class ResponseStreamErrorException(
+    val code: String?,
+    message: String,
+    cause: Throwable? = null,
+) : IOException(message, cause)
+
+private fun JsonObject.responseErrorObject(): JsonObject? =
+    this["error"]?.jsonObject
+        ?: this["response"]?.jsonObject?.get("error")?.jsonObject
+
+private fun JsonObject.responseErrorText(name: String): String? = runCatching {
+    this[name]?.jsonPrimitive?.contentOrNull
+        ?: this["response"]?.jsonObject?.get(name)?.jsonPrimitive?.contentOrNull
+        ?: this.responseErrorObject()?.get(name)?.jsonPrimitive?.contentOrNull
+}.getOrNull()?.takeIf { it.isNotBlank() }
+
+/** Convert `error`/`response.failed` SSE payloads into a useful, non-retryable exception. */
+internal fun parseResponseStreamError(
+    payload: JsonObject,
+    eventType: String?,
+): ResponseStreamErrorException {
+    val code = payload.responseErrorText("code")
+    val message = runCatching {
+        val error = payload["error"] ?: payload["response"]?.jsonObject?.get("error")
+        error?.parseErrorDetail()?.message
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: payload.responseErrorText("message")
+        ?: code
+        ?: "unknown provider error"
+    val eventLabel = eventType?.takeIf { it.isNotBlank() } ?: "error"
+    val detail = buildString {
+        append("Response API $eventLabel")
+        if (code != null && !message.contains(code, ignoreCase = true)) {
+            append(" [$code]")
+        }
+        append(": ")
+        append(message)
+    }
+    return ResponseStreamErrorException(code = code, message = detail)
+}
+
+internal fun shouldRetryResponseStream(
+    failure: Throwable,
+    retryAttempt: Long,
+    maxRetries: Int,
+): Boolean {
+    if (retryAttempt >= maxRetries.coerceAtLeast(0).toLong()) return false
+    if (failure is ResponseStreamErrorException) return false
+    // Some gateways return the context error as a non-2xx response body instead of an SSE
+    // event. Preserve the error for ChatService's compaction path and never replay it blindly.
+    if (generateSequence(failure) { it.cause }.take(8).any { cause ->
+            val text = (cause.message.orEmpty() + " " + cause.toString())
+                .lowercase()
+                .replace('_', ' ')
+            "context length exceeded" in text ||
+                "context_length_exceeded" in text ||
+                "maximum context length" in text
+        }) {
+        return false
+    }
+    if ((failure as? ResponseStreamFailureException)?.receivedMeaningfulOutput == true) {
+        return false
+    }
+    // Response API can surface HTTP, decoding, callback, and other provider failures using
+    // different exception types. Retry every failure except cancellation requested by the user
+    // (or cancellation propagated from the parent coroutine).
+    return !isCancellationFailure(failure)
+}
+
+// Same wording ChatCompletionsAPI uses when downgrading an image to text for a
+// model without image input support; reused here for consistency.
+private const val IMAGE_UNSUPPORTED_PLACEHOLDER =
+    "[Image output omitted: current model does not support image input]"
 
 class ResponseAPI(
     private val client: OkHttpClient,
@@ -96,15 +207,19 @@ class ResponseAPI(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "generateText: ${json.encodeToString(requestBody)}")
+        if (Logging.isDebugLoggingEnabled()) {
+            Log.i(TAG, "generateText: ${json.encodeToString(redactSecrets(requestBody))}")
+        }
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
             throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
         }
 
-        val bodyStr = response.body?.string() ?: ""
-        Log.i(TAG, "generateText: $bodyStr")
+        val bodyStr = response.body.string()
+        if (Logging.isDebugLoggingEnabled()) {
+            Log.i(TAG, "generateText: ${redactSecrets(json.parseToJsonElement(bodyStr))}")
+        }
         val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
         val output = parseResponseOutput(bodyJson)
 
@@ -133,7 +248,13 @@ class ResponseAPI(
             .configureReferHeaders(providerSetting.baseUrl)
             .build()
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        if (Logging.isDebugLoggingEnabled()) {
+            Log.i(TAG, "streamText: ${json.encodeToString(redactSecrets(requestBody))}")
+        }
+
+        val completionReceived = AtomicBoolean(false)
+        val canceledByCollector = AtomicBoolean(false)
+        val receivedMeaningfulOutput = AtomicBoolean(false)
 
         val decoder = ResponseApiStreamDecoder()
 
@@ -153,40 +274,110 @@ class ResponseAPI(
                 data: String
             ) {
                 Log.d(TAG, "onEvent: $id/$type $data")
+                if (data.trim() == "[DONE]") {
+                    try {
+                        sendChunks(decoder.accept(SseEvent(id = id, event = type, data = data)).chunks)
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "onEvent: failed to finish decoder for [DONE]", e)
+                    }
+                    completionReceived.set(true)
+                    close()
+                    return
+                }
+                // A business error is already a complete response from the provider (context
+                // length, moderation refusal, etc.) - classify it before handing the raw event
+                // to the decoder so it surfaces as a non-retryable ResponseStreamErrorException
+                // instead of a generic decode failure.
+                val json = runCatching {
+                    json.parseToJsonElement(data).jsonObject
+                }.getOrElse { error ->
+                    close(
+                        ResponseStreamFailureException(
+                            receivedMeaningfulOutput = receivedMeaningfulOutput.get(),
+                            message = "Response stream contained invalid JSON: ${error.message.orEmpty()}",
+                            cause = error,
+                        )
+                    )
+                    return
+                }
+                val eventType = json["type"]?.jsonPrimitive?.contentOrNull ?: type
+                if (eventType == "error" || eventType == "response.failed") {
+                    close(parseResponseStreamError(json, eventType))
+                    return
+                }
                 try {
                     val result = decoder.accept(SseEvent(id = id, event = type, data = data))
+                    if (result.chunks.any { it !is StreamChunk.Usage && it !is StreamChunk.Finish }) {
+                        receivedMeaningfulOutput.set(true)
+                    }
                     sendChunks(result.chunks)
-                    if (result.completed) close()
+                    if (result.completed) {
+                        completionReceived.set(true)
+                        close()
+                    }
                 } catch (e: Throwable) {
-                    close(e)
+                    close(
+                        ResponseStreamFailureException(
+                            receivedMeaningfulOutput = receivedMeaningfulOutput.get(),
+                            message = "Failed to decode stream event: ${e.message.orEmpty()}",
+                            cause = e,
+                        )
+                    )
                 }
             }
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-                var exception = t
+                if (canceledByCollector.get() || completionReceived.get()) return
 
-                t?.printStackTrace()
-                println("[onFailure] 发生错误: ${t?.javaClass?.name} ${t?.message} / $response")
+                var exception: Throwable = t ?: IOException(
+                    "Response stream failed${response?.code?.let { " (HTTP $it)" }.orEmpty()}"
+                )
+
+                Log.w(TAG, "onFailure: ${t?.javaClass?.name} ${t?.message} / $response", t)
 
                 val bodyRaw = response?.body?.stringSafe()
                 try {
                     if (!bodyRaw.isNullOrBlank()) {
                         val bodyElement = Json.parseToJsonElement(bodyRaw)
-                        println(bodyElement)
-                        exception = bodyElement.parseErrorDetail()
+                        Log.d(TAG, "onFailure: error body $bodyElement")
+                        val detail = bodyElement.parseErrorDetail()
+                        val code = (bodyElement as? JsonObject)?.responseErrorText("code")
+                        exception = if (code != null && !detail.message.orEmpty().contains(code, ignoreCase = true)) {
+                            IOException("$code: ${detail.message.orEmpty()}", detail)
+                        } else {
+                            detail
+                        }
                         Log.i(TAG, "onFailure: $exception")
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw")
-                    e.printStackTrace()
-                } finally {
-                    close(exception)
+                    Log.w(TAG, "onFailure: failed to parse from $bodyRaw", e)
                 }
+                if (receivedMeaningfulOutput.get()) {
+                    exception = ResponseStreamFailureException(
+                        receivedMeaningfulOutput = true,
+                        message = "Response stream failed after partial output: ${exception.message.orEmpty()}",
+                        cause = exception,
+                    )
+                }
+                close(exception)
             }
 
             override fun onClosed(eventSource: EventSource) {
-                sendChunks(decoder.onClosed())
-                close()
+                if (canceledByCollector.get() || completionReceived.get()) {
+                    sendChunks(decoder.onClosed())
+                    close()
+                    return
+                }
+                close(
+                    ResponseStreamFailureException(
+                        receivedMeaningfulOutput = receivedMeaningfulOutput.get(),
+                        message = if (receivedMeaningfulOutput.get()) {
+                            "Response stream closed before completion after partial output"
+                        } else {
+                            "Response stream closed unexpectedly before response.completed or [DONE]"
+                        },
+                    )
+                )
             }
         }
 
@@ -194,11 +385,18 @@ class ResponseAPI(
             .newEventSource(request, listener)
 
         awaitClose {
-            println("[awaitClose] 关闭eventSource ")
+            canceledByCollector.set(true)
             eventSource.cancel()
         }
         // trySend 在缓冲满时会静默丢弃 delta，导致回复中间缺字 (#1295)，因此缓冲必须无界
     }.buffer(Channel.UNLIMITED)
+
+    fun createRequestBody(
+        providerSetting: ProviderSetting.OpenAI,
+        messages: List<UIMessage>,
+        params: TextGenerationParams,
+        stream: Boolean
+    ): JsonObject = buildRequestBody(providerSetting, messages, params, stream)
 
     internal fun buildRequestBody(
         providerSetting: ProviderSetting.OpenAI,
@@ -228,7 +426,7 @@ class ResponseAPI(
             }
 
             // messages
-            put("input", buildMessages(messages))
+            put("input", buildMessages(messages, supportInputModalities = params.model.inputModalities))
 
             // reasoning
             if (params.model.abilities.contains(ModelAbility.REASONING)) {
@@ -294,7 +492,10 @@ class ResponseAPI(
         }.mergeCustomBody(params.customBody)
     }
 
-    internal fun buildMessages(messages: List<UIMessage>) = buildJsonArray {
+    fun buildMessages(
+        messages: List<UIMessage>,
+        supportInputModalities: List<Modality> = listOf(Modality.TEXT, Modality.IMAGE),
+    ) = buildJsonArray {
         messages
             .filter { message ->
                 message.role != MessageRole.SYSTEM && (
@@ -306,14 +507,14 @@ class ResponseAPI(
             }
             .forEach { message ->
                 if (message.role == MessageRole.ASSISTANT) {
-                    addAssistantItems(message)
+                    addAssistantItems(message, supportInputModalities)
                 } else {
-                    addUserItems(message)
+                    addUserItems(message, supportInputModalities)
                 }
             }
     }
 
-    private fun JsonArrayBuilder.addAssistantItems(message: UIMessage) {
+    private fun JsonArrayBuilder.addAssistantItems(message: UIMessage, supportInputModalities: List<Modality>) {
         val groups = groupPartsByToolBoundary(message.parts)
         val contentBuffer = mutableListOf<UIMessagePart>()
 
@@ -331,7 +532,7 @@ class ResponseAPI(
                                 }
                                 // 先输出累积的文本/图片内容
                                 if (contentBuffer.isNotEmpty()) {
-                                    addContentItem(MessageRole.ASSISTANT, contentBuffer)
+                                    addContentItem(MessageRole.ASSISTANT, contentBuffer, supportInputModalities)
                                     contentBuffer.clear()
                                 }
                                 // 输出 reasoning item
@@ -378,10 +579,10 @@ class ResponseAPI(
 
                             is UIMessagePart.Image -> {
                                 if (contentBuffer.isNotEmpty()) {
-                                    addContentItem(MessageRole.ASSISTANT, contentBuffer)
+                                    addContentItem(MessageRole.ASSISTANT, contentBuffer, supportInputModalities)
                                     contentBuffer.clear()
                                 }
-                                addContentItem(MessageRole.USER, listOf(part))
+                                addContentItem(MessageRole.USER, listOf(part), supportInputModalities)
                             }
 
                             is UIMessagePart.Text -> {
@@ -390,7 +591,7 @@ class ResponseAPI(
 
                             is UIMessagePart.ServerTool -> {
                                 if (contentBuffer.isNotEmpty()) {
-                                    addContentItem(MessageRole.ASSISTANT, contentBuffer)
+                                    addContentItem(MessageRole.ASSISTANT, contentBuffer, supportInputModalities)
                                     contentBuffer.clear()
                                 }
                                 addServerToolItem(part)
@@ -404,7 +605,7 @@ class ResponseAPI(
                 is PartGroup.Tools -> {
                     // 先输出累积的内容
                     if (contentBuffer.isNotEmpty()) {
-                        addContentItem(MessageRole.ASSISTANT, contentBuffer)
+                        addContentItem(MessageRole.ASSISTANT, contentBuffer, supportInputModalities)
                         contentBuffer.clear()
                     }
 
@@ -423,7 +624,8 @@ class ResponseAPI(
                             put("type", "function_call_output")
                             put("call_id", tool.toolCallId)
                             val hasImage = tool.output.any { it is UIMessagePart.Image }
-                            if (hasImage) {
+                            val supportsImageInput = Modality.IMAGE in supportInputModalities
+                            if (hasImage && supportsImageInput) {
                                 putJsonArray("output") {
                                     tool.output.forEach { part ->
                                         when (part) {
@@ -445,6 +647,21 @@ class ResponseAPI(
                                         }
                                     }
                                 }
+                            } else if (hasImage) {
+                                // Text-only model: fold the image(s) into the placeholder
+                                // text, mirroring ChatCompletionsAPI's toToolResultContent,
+                                // so the model still sees that a tool produced an image
+                                // without leaking image data it can't accept.
+                                put(
+                                    "output",
+                                    tool.output.mapNotNull { part ->
+                                        when (part) {
+                                            is UIMessagePart.Text -> part.text
+                                            is UIMessagePart.Image -> IMAGE_UNSUPPORTED_PLACEHOLDER
+                                            else -> null
+                                        }
+                                    }.joinToString("\n")
+                                )
                             } else {
                                 put(
                                     "output",
@@ -453,6 +670,27 @@ class ResponseAPI(
                                 )
                             }
                         })
+                        // Image lift: function_call_output is text-only, so a tool that
+                        // returns UIMessagePart.Image (take_screenshot, take_photo, etc.)
+                        // would otherwise be invisible to vision-capable models. Inject
+                        // those images as a follow-up user content item. Skipped for
+                        // text-only models: the function_call_output above already emits
+                        // the placeholder text for those images, so nothing is lost.
+                        val toolImages = if (Modality.IMAGE in supportInputModalities) {
+                            tool.output.filterIsInstance<UIMessagePart.Image>()
+                        } else {
+                            emptyList()
+                        }
+                        if (toolImages.isNotEmpty()) {
+                            addContentItem(
+                                MessageRole.USER,
+                                buildList {
+                                    add(UIMessagePart.Text("[Tool ${tool.toolName} produced the image(s) below.]"))
+                                    addAll(toolImages)
+                                },
+                                supportInputModalities
+                            )
+                        }
                     }
                 }
             }
@@ -460,7 +698,7 @@ class ResponseAPI(
 
         // 输出剩余内容
         if (contentBuffer.isNotEmpty()) {
-            addContentItem(MessageRole.ASSISTANT, contentBuffer)
+            addContentItem(MessageRole.ASSISTANT, contentBuffer, supportInputModalities)
         }
     }
 
@@ -488,14 +726,18 @@ class ResponseAPI(
         })
     }
 
-    private fun JsonArrayBuilder.addUserItems(message: UIMessage) {
+    private fun JsonArrayBuilder.addUserItems(message: UIMessage, supportInputModalities: List<Modality>) {
         val contentParts = message.parts.filter { it is UIMessagePart.Text || it is UIMessagePart.Image }
         if (contentParts.isNotEmpty()) {
-            addContentItem(message.role, contentParts)
+            addContentItem(message.role, contentParts, supportInputModalities)
         }
     }
 
-    private fun JsonArrayBuilder.addContentItem(role: MessageRole, parts: List<UIMessagePart>) {
+    private fun JsonArrayBuilder.addContentItem(
+        role: MessageRole,
+        parts: List<UIMessagePart>,
+        supportInputModalities: List<Modality>,
+    ) {
         if (parts.isEmpty()) return
 
         add(buildJsonObject {
@@ -516,13 +758,18 @@ class ResponseAPI(
 
                             is UIMessagePart.Image -> {
                                 add(buildJsonObject {
-                                    part.encodeBase64().onSuccess { encodedImage ->
-                                        put("type", "input_image")
-                                        put("image_url", encodedImage.base64)
-                                    }.onFailure {
-                                        it.printStackTrace()
+                                    if (Modality.IMAGE !in supportInputModalities) {
                                         put("type", "input_text")
-                                        put("text", "Error: Failed to encode image to base64")
+                                        put("text", IMAGE_UNSUPPORTED_PLACEHOLDER)
+                                    } else {
+                                        part.encodeBase64().onSuccess { encodedImage ->
+                                            put("type", "input_image")
+                                            put("image_url", encodedImage.base64)
+                                        }.onFailure {
+                                            Log.w(TAG, "failed to encode image to base64", it)
+                                            put("type", "input_text")
+                                            put("text", "Error: Failed to encode image to base64")
+                                        }
                                     }
                                 })
                             }

@@ -14,13 +14,27 @@ import kotlinx.serialization.json.Json
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.common.http.AcceptLanguageBuilder
 import me.rerere.rikkahub.BuildConfig
+import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.AIRequestInterceptor
 import me.rerere.rikkahub.data.ai.RequestLoggingInterceptor
 import me.rerere.rikkahub.data.ai.transformers.AssistantTemplateLoader
 import me.rerere.rikkahub.data.ai.GenerationHandler
 import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
+import me.rerere.rikkahub.data.api.HuggingFaceAPI
 import me.rerere.rikkahub.data.api.RikkaHubAPI
 import me.rerere.rikkahub.data.api.SponsorAPI
+import me.rerere.rikkahub.data.codex.CodexAccountRepository
+import me.rerere.rikkahub.data.codex.CodexCredentialStore
+import me.rerere.rikkahub.data.codex.CodexOAuthManager
+import me.rerere.rikkahub.data.codex.CodexProvider
+import me.rerere.rikkahub.data.grok.GrokAccountRepository
+import me.rerere.rikkahub.data.grok.GrokCredentialStore
+import me.rerere.rikkahub.data.grok.GrokOAuthManager
+import me.rerere.rikkahub.data.gemini.GeminiAccountRepository
+import me.rerere.rikkahub.data.gemini.GeminiCredentialStore
+import me.rerere.rikkahub.data.gemini.GeminiOAuthManager
+import me.rerere.rikkahub.data.gemini.GeminiProvider
+import me.rerere.rikkahub.data.grok.GrokProvider
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.db.AppDatabase
 import me.rerere.rikkahub.data.db.fts.MessageFtsManager
@@ -30,10 +44,13 @@ import me.rerere.rikkahub.data.db.migrations.Migration_11_12
 import me.rerere.rikkahub.data.db.migrations.Migration_13_14
 import me.rerere.rikkahub.data.db.migrations.Migration_14_15
 import me.rerere.rikkahub.data.db.migrations.Migration_15_16
+import me.rerere.rikkahub.data.db.migrations.Migration_23_24
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.network.SettingsProxySelector
 import me.rerere.rikkahub.data.network.SettingsProxyAuthenticator
 import me.rerere.rikkahub.data.network.SettingsSocks5Authenticator
+import me.rerere.rikkahub.data.agentrun.AgentRunBootRecovery
+import me.rerere.rikkahub.data.agentrun.AgentRunRepository
 import me.rerere.rikkahub.data.sync.webdav.WebDavSync
 import me.rerere.search.SearchService
 import me.rerere.rikkahub.data.sync.S3Sync
@@ -41,6 +58,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import org.koin.dsl.module
+import org.koin.core.qualifier.named
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.util.Locale
@@ -56,36 +74,37 @@ val dataSourceModule = module {
         val context: Context = get()
         Room.databaseBuilder(context, AppDatabase::class.java, "rikka_hub")
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(Migration_6_7, Migration_11_12, Migration_13_14, Migration_14_15, Migration_15_16)
+            .addMigrations(Migration_6_7, Migration_11_12, Migration_13_14, Migration_14_15, Migration_15_16, Migration_23_24)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onOpen(db: SupportSQLiteDatabase) {
-                    val dictDir = SimpleDictManager.extractDict(context)
-                    val cursor = db.query("SELECT jieba_dict(?)", arrayOf(dictDir.absolutePath))
-                    cursor.use {
-                        if (it.moveToFirst()) {
-                            val result = it.getString(0)
-                            val success = result?.trimEnd('/') == dictDir.absolutePath.trimEnd('/')
-                            if (!success) {
-                                android.util.Log.e(
-                                    "DataSourceModule",
-                                    "jieba_dict failed: $result, path=${dictDir.absolutePath}"
-                                )
+                    // Both steps below are best-effort FTS setup: a failure here (missing dict
+                    // assets, FTS5 module unavailable, native lib not loaded yet) must degrade
+                    // search, not crash every single app launch by throwing out of onOpen and
+                    // failing the whole database open.
+                    try {
+                        val dictDir = SimpleDictManager.extractDict(context)
+                        val cursor = db.query("SELECT jieba_dict(?)", arrayOf(dictDir.absolutePath))
+                        cursor.use {
+                            if (it.moveToFirst()) {
+                                val result = it.getString(0)
+                                val success = result?.trimEnd('/') == dictDir.absolutePath.trimEnd('/')
+                                if (!success) {
+                                    android.util.Log.e(
+                                        "DataSourceModule",
+                                        "jieba_dict failed: $result, path=${dictDir.absolutePath}"
+                                    )
+                                }
                             }
                         }
+                    } catch (e: Exception) {
+                        android.util.Log.e("DataSourceModule", "onOpen: jieba_dict setup failed", e)
                     }
-                    db.execSQL(
-                        """
-                        CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
-                            text,
-                            node_id UNINDEXED,
-                            message_id UNINDEXED,
-                            conversation_id UNINDEXED,
-                            title UNINDEXED,
-                            update_at UNINDEXED,
-                            tokenize = 'simple'
-                        )
-                        """.trimIndent()
-                    )
+
+                    try {
+                        db.execSQL(me.rerere.rikkahub.data.db.fts.MESSAGE_FTS_CREATE_SQL.trimIndent())
+                    } catch (e: Exception) {
+                        android.util.Log.e("DataSourceModule", "onOpen: message_fts table creation failed", e)
+                    }
                 }
             })
             .openHelperFactory(
@@ -123,6 +142,10 @@ val dataSourceModule = module {
     }
 
     single {
+        get<AppDatabase>().conversationCompactionDao()
+    }
+
+    single {
         get<AppDatabase>().memoryDao()
     }
 
@@ -154,6 +177,13 @@ val dataSourceModule = module {
         MessageFtsManager(get())
     }
 
+    // Phase 24 — unified AgentRun ledger. DAO + the single shared writer/reader + the
+    // boot-recovery sweep. AgentRunRepository has no cross-dependencies (only the DAO), so
+    // there is no DI-cycle risk here.
+    single { get<AppDatabase>().agentRunDao() }
+    single { AgentRunRepository(get()) }
+    single { AgentRunBootRecovery(context = get(), repository = get()) }
+
     single { McpManager(settingsStore = get(), appScope = get(), filesManager = get(), appEventBus = get()) }
 
     single {
@@ -161,9 +191,14 @@ val dataSourceModule = module {
             context = get(),
             providerManager = get(),
             json = get(),
-            memoryRepo = get()
+            memoryRepo = get(),
+            conversationRepo = get(),
+            aiLoggingManager = get(),
+            systemPromptBuilder = get(),
         )
     }
+
+    single { me.rerere.rikkahub.data.ai.SystemPromptBuilder() }
 
     single<OkHttpClient> {
         val settingsStore: SettingsStore = get()
@@ -231,12 +266,86 @@ val dataSourceModule = module {
             }
             .addNetworkInterceptor(RequestLoggingInterceptor())
             .addInterceptor(AIRequestInterceptor())
-            .addInterceptor(HttpLoggingInterceptor().apply {
-                redactHeader("Proxy-Authorization")
-                level = HttpLoggingInterceptor.Level.HEADERS
-            })
+            .apply {
+                // HEADERS-level logging prints Authorization: Bearer <api-key> to logcat.
+                // Debug-only so release builds never leak provider keys to logcat.
+                if (BuildConfig.DEBUG) {
+                    addInterceptor(HttpLoggingInterceptor().apply {
+                        redactHeader("Authorization")
+                        redactHeader("Proxy-Authorization")
+                        level = HttpLoggingInterceptor.Level.HEADERS
+                    })
+                }
+            }
+            .build().also { SearchService.init(it, get()) }
+    }
+
+    single<OkHttpClient>(named("codex")) {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.MINUTES)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .followSslRedirects(true)
+            .followRedirects(true)
+            .retryOnConnectionFailure(true)
             .build()
-        client.also { SearchService.init(it, get()) }
+    }
+
+    single<OkHttpClient>(named("grok")) {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.MINUTES)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .followSslRedirects(true)
+            .followRedirects(true)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+    single<OkHttpClient>(named("gemini")) {
+        OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.MINUTES)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .followSslRedirects(true)
+            .followRedirects(true)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+    single {
+        GrokAccountRepository(
+            store = GrokCredentialStore(context = get(), json = get()),
+            client = get(named("grok")),
+            json = get(),
+        )
+    }
+
+    single {
+        GrokOAuthManager(
+            context = get(),
+            scope = get<AppScope>(),
+            client = get(named("grok")),
+            repository = get(),
+            json = get(),
+        )
+    }
+
+    single {
+        GeminiAccountRepository(
+            store = GeminiCredentialStore(context = get(), json = get()),
+            client = get(named("gemini")),
+            json = get(),
+        )
+    }
+
+    single {
+        GeminiOAuthManager(
+            context = get(),
+            scope = get<AppScope>(),
+            client = get(named("gemini")),
+            repository = get(),
+        )
     }
 
     single {
@@ -244,7 +353,77 @@ val dataSourceModule = module {
     }
 
     single {
-        ProviderManager(client = get(), context = get())
+        HuggingFaceAPI.create(get())
+    }
+
+    single {
+        CodexAccountRepository(
+            store = CodexCredentialStore(context = get(), json = get()),
+            client = get(named("codex")),
+            json = get(),
+        )
+    }
+
+    single {
+        CodexOAuthManager(
+            context = get(),
+            scope = get<AppScope>(),
+            client = get(named("codex")),
+            repository = get(),
+        )
+    }
+
+    single {
+        val settingsStore: me.rerere.rikkahub.data.datastore.SettingsStore = get()
+        val codexRepository: CodexAccountRepository = get()
+        val json: Json = get()
+        ProviderManager(client = get(), context = get()).also { pm ->
+            pm.registerProvider(
+                "local_litert",
+                me.rerere.locallm.litert.LiteRtProvider(
+                    context = get(),
+                    runtime = get(),
+                    prefs = get(),
+                    settingsUpdater = { transform ->
+                        settingsStore.update { old -> old.copy(providers = transform(old.providers)) }
+                    },
+                ),
+            )
+            pm.registerProvider(
+                "local_llamacpp",
+                me.rerere.llamacpp.LlamaCppProvider(
+                    context = get(),
+                    runtime = get(),
+                    prefs = get(),
+                ),
+            )
+            pm.registerProvider(
+                "codex",
+                CodexProvider(
+                    client = get(named("codex")),
+                    repository = codexRepository,
+                    json = json,
+                    scope = get(),
+                )
+            )
+            pm.registerProvider(
+                "grok",
+                GrokProvider(
+                    client = get(named("grok")),
+                    repository = get<GrokAccountRepository>(),
+                    json = json,
+                    scope = get(),
+                )
+            )
+            pm.registerProvider(
+                "gemini_oauth",
+                GeminiProvider(
+                    client = get(named("gemini")),
+                    repository = get<GeminiAccountRepository>(),
+                    json = json,
+                )
+            )
+        }
     }
 
     single {
@@ -252,7 +431,8 @@ val dataSourceModule = module {
             settingsStore = get(),
             json = get(),
             context = get(),
-            httpClient = get()
+            httpClient = get(),
+            appDatabase = get()
         )
     }
 
@@ -276,7 +456,8 @@ val dataSourceModule = module {
             settingsStore = get(),
             json = get(),
             context = get(),
-            httpClient = get()
+            httpClient = get(),
+            appDatabase = get()
         )
     }
 

@@ -26,10 +26,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
 import me.rerere.ai.core.TokenUsage
 import me.rerere.ai.provider.BuiltInTools
+import me.rerere.ai.provider.ImageGenerationParams
+import me.rerere.ai.ui.ImageAspectRatio
+import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.ai.provider.Modality
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.ModelAbility
@@ -44,7 +48,9 @@ import me.rerere.ai.provider.providers.groupPartsByToolBoundary
 import me.rerere.ai.provider.stream.SseEvent
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.GoogleThoughtMetadata
+import me.rerere.ai.ui.MessageChunk
 import me.rerere.ai.ui.StreamChunk
+import me.rerere.ai.ui.UIMessageChoice
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
@@ -55,9 +61,11 @@ import me.rerere.ai.util.configureReferHeaders
 import me.rerere.ai.util.encodeBase64
 import me.rerere.ai.util.json
 import me.rerere.ai.util.mergeCustomBody
-import me.rerere.ai.util.removeElements
+import me.rerere.ai.util.redactSecrets
+import me.rerere.ai.util.sanitizeForGeminiSchema
 import me.rerere.ai.util.stringSafe
 import me.rerere.ai.util.toHeaders
+import me.rerere.common.android.Logging
 import me.rerere.common.http.await
 import me.rerere.common.http.jsonPrimitiveOrNull
 import okhttp3.HttpUrl
@@ -75,6 +83,25 @@ import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
 private const val TAG = "GoogleProvider"
+
+/**
+ * Every category the generative-language API accepts on `safetySettings`.
+ */
+val GOOGLE_SAFETY_CATEGORIES = listOf(
+    "HARM_CATEGORY_HARASSMENT",
+    "HARM_CATEGORY_HATE_SPEECH",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_DANGEROUS_CONTENT",
+    "HARM_CATEGORY_CIVIC_INTEGRITY",
+)
+
+/**
+ * What Cloud Code Assist accepts, which is the same list minus civic integrity: sending that one
+ * fails the whole request with a 400 naming the offending element, even though the error text
+ * lists the category as allowed.
+ */
+val CODE_ASSIST_SAFETY_CATEGORIES =
+    GOOGLE_SAFETY_CATEGORIES - "HARM_CATEGORY_CIVIC_INTEGRITY"
 
 class GoogleProvider(private val client: OkHttpClient, context: Context? = null) : Provider<ProviderSetting.Google> {
     private val keyRoulette = if (context != null) KeyRoulette.lru(context) else KeyRoulette.default()
@@ -130,7 +157,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             )
             val response = client.newCall(request).await()
             if (response.isSuccessful) {
-                val body = response.body?.string() ?: error("empty body")
+                val body = response.body.string()
                 Log.d(TAG, "listModels: $body")
                 val bodyObject = json.parseToJsonElement(body).jsonObject
                 val models = bodyObject["models"]?.jsonArray ?: return@withContext emptyList()
@@ -187,10 +214,10 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
         val response = client.newCall(request).await()
         if (!response.isSuccessful) {
-            throw Exception("Failed to get response: ${response.code} ${response.body?.string()}")
+            throw Exception("Failed to get response: ${response.code} ${response.body.string()}")
         }
 
-        val bodyStr = response.body?.string() ?: ""
+        val bodyStr = response.body.string()
         val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
 
         val candidate = bodyJson["candidates"]?.jsonArray?.firstOrNull()?.jsonObject
@@ -232,7 +259,9 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                 .build()
         )
 
-        Log.i(TAG, "streamText: ${json.encodeToString(requestBody)}")
+        if (Logging.isDebugLoggingEnabled()) {
+            Log.i(TAG, "streamText: ${json.encodeToString(redactSecrets(requestBody))}")
+        }
 
         val responseId = Uuid.random().toString()
         val decoder = GoogleStreamDecoder(responseId, params.model.modelId)
@@ -258,9 +287,16 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     val result = decoder.accept(SseEvent(id = id, event = type, data = data))
                     sendChunks(result.chunks)
                     if (result.completed) close()
-                } catch (e: Throwable) {
-                    Log.e(TAG, "Failed to parse stream event: $data", e)
+                } catch (e: IllegalStateException) {
+                    // Deliberate stream termination raised by the decoder itself
+                    // (e.g. a prompt-feedback block reason), not a parse failure.
+                    Log.e(TAG, "Stream terminated: $data", e)
                     close(e)
+                } catch (e: Throwable) {
+                    // A single malformed/unparseable chunk must not escape this callback:
+                    // an uncaught exception here propagates through OkHttp's SSE reader and
+                    // aborts the whole stream instead of just skipping this one line.
+                    Log.w(TAG, "onEvent: skipping malformed chunk (${e.message})", e)
                 }
             }
 
@@ -271,15 +307,14 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             ) {
                 var exception = t
 
-                t?.printStackTrace()
-                println("[onFailure] 发生错误: ${t?.message}")
+                Log.w(TAG, "onFailure: ${t?.message}", t)
 
                 try {
                     if (t == null && response != null) {
                         val bodyStr = response.body.stringSafe()
                         if (!bodyStr.isNullOrEmpty()) {
                             val bodyElement = json.parseToJsonElement(bodyStr)
-                            println(bodyElement)
+                            Log.d(TAG, "onFailure: error body $bodyElement")
                             if (bodyElement is JsonObject) {
                                 exception = Exception(
                                     bodyElement["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content
@@ -291,7 +326,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         }
                     }
                 } catch (e: Throwable) {
-                    e.printStackTrace()
+                    Log.w(TAG, "onFailure: failed to parse error body", e)
                     exception = e
                 } finally {
                     close(exception ?: Exception("Stream failed"))
@@ -315,9 +350,52 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         // trySend 在缓冲满时会静默丢弃 delta，导致回复中间缺字 (#1295)，因此缓冲必须无界
     }.buffer(Channel.UNLIMITED)
 
-    private fun buildCompletionRequestBody(
+    /**
+     * Map one decoded `streamGenerateContent` payload onto a [MessageChunk], or null when it
+     * carries no candidates yet.
+     *
+     * Public alongside [buildCompletionRequestBody] so the Cloud Code Assist transport can reuse
+     * the Gemini wire format it wraps: that API takes the same request body under a `request` key
+     * and returns the same candidates under a `response` key, so a second copy of the part
+     * decoding would only give the two transports room to drift apart.
+     */
+    fun parseStreamCandidates(jsonData: JsonObject, model: Model): MessageChunk? {
+        val candidates = jsonData["candidates"]?.jsonArray ?: return null
+        if (candidates.isEmpty()) return null
+        return MessageChunk(
+            id = Uuid.random().toString(),
+            model = model.modelId,
+            choices = candidates.mapIndexed { index, candidate ->
+                val candidateObj = candidate.jsonObject
+                val content = candidateObj["content"]?.jsonObject
+                val groundingMetadata = candidateObj["groundingMetadata"]?.jsonObject
+                val finishReason = candidateObj["finishReason"]?.jsonPrimitive?.contentOrNull
+
+                val message = content?.let {
+                    parseMessage(buildJsonObject {
+                        put("role", JsonPrimitive("model"))
+                        put("content", it)
+                        groundingMetadata?.let { groundingMetadata ->
+                            put("groundingMetadata", groundingMetadata)
+                        }
+                    })
+                }
+
+                UIMessageChoice(
+                    index = index,
+                    delta = message,
+                    message = null,
+                    finishReason = finishReason
+                )
+            },
+            usage = parseUsageMeta(jsonData["usageMetadata"] as? JsonObject)
+        )
+    }
+
+    fun buildCompletionRequestBody(
         messages: List<UIMessage>,
-        params: TextGenerationParams
+        params: TextGenerationParams,
+        safetyCategories: List<String> = GOOGLE_SAFETY_CATEGORIES,
     ): JsonObject = buildJsonObject {
         // System message if available
         val systemMessage = messages.firstOrNull { it.role == MessageRole.SYSTEM }
@@ -357,7 +435,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
                         ReasoningLevel.OFF -> {
                             if (ModelRegistry.GEMINI_3_SERIES.match(modelId = params.model.modelId)) {
-                                put("thinkingLevel", "minimal")
+                                put("thinkingLevel", "MINIMAL")
                             } else if (!isGeminiPro) {
                                 put("thinkingBudget", 0)
                                 put("includeThoughts", false)
@@ -367,9 +445,9 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                         else -> {
                             if (ModelRegistry.GEMINI_3_SERIES.match(modelId = params.model.modelId)) {
                                 when (params.reasoningLevel) {
-                                    ReasoningLevel.LOW -> put("thinkingLevel", "low")
-                                    ReasoningLevel.MEDIUM -> put("thinkingLevel", "medium")
-                                    else -> put("thinkingLevel", "high") // HIGH, XHIGH
+                                    ReasoningLevel.LOW -> put("thinkingLevel", "LOW")
+                                    ReasoningLevel.MEDIUM -> put("thinkingLevel", "MEDIUM")
+                                    else -> put("thinkingLevel", "HIGH") // HIGH, XHIGH, MAX
                                 }
                             } else {
                                 put("thinkingBudget", params.reasoningLevel.budgetTokens)
@@ -386,81 +464,70 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             buildContents(messages)
         )
 
-        // Tools
-        if (params.tools.isNotEmpty() && params.model.abilities.contains(ModelAbility.TOOL)) {
+        // Tools — function tools and model built-in tools both live under the same
+        // "tools" key. Writing them via two separate put("tools", ...) calls made the
+        // second overwrite the first outright (JsonObjectBuilder.put replaces an
+        // existing key), so built-in tools silently clobbered every function tool
+        // whenever both were present. Build one array covering both.
+        val hasFunctionTools = params.tools.isNotEmpty() && params.model.abilities.contains(ModelAbility.TOOL)
+        val hasBuiltInTools = params.model.tools.isNotEmpty()
+        if (hasFunctionTools || hasBuiltInTools) {
             put("tools", buildJsonArray {
-                add(buildJsonObject {
-                    put("functionDeclarations", buildJsonArray {
-                        params.tools.forEach { tool ->
-                            add(buildJsonObject {
-                                put("name", JsonPrimitive(tool.name))
-                                put("description", JsonPrimitive(tool.description))
-                                put(
-                                    key = "parameters",
-                                    element = json.encodeToJsonElement(tool.parameters())
-                                        .removeElements(
-                                            listOf(
-                                                "const",
-                                                "exclusiveMaximum",
-                                                "exclusiveMinimum",
-                                                "format",
-                                                "additionalProperties",
-                                                "enum",
-                                            )
+                if (hasFunctionTools) {
+                    add(buildJsonObject {
+                        put("functionDeclarations", buildJsonArray {
+                            params.tools.forEach { tool ->
+                                add(buildJsonObject {
+                                    put("name", JsonPrimitive(tool.name))
+                                    put("description", JsonPrimitive(tool.description))
+                                    val parameters = tool.parameters()
+                                    if (parameters != null) {
+                                        put(
+                                            key = "parameters",
+                                            element = json.encodeToJsonElement(parameters)
+                                                .sanitizeForGeminiSchema()
                                         )
-                                )
-                            })
-                        }
+                                    }
+                                })
+                            }
+                        })
                     })
-                })
-            })
-        }
-        // Model BuiltIn Tools
-        // 目前不能和工具调用兼容
-        if (params.model.tools.isNotEmpty()) {
-            put("tools", buildJsonArray {
-                params.model.tools.forEach { builtInTool ->
-                    when (builtInTool) {
-                        BuiltInTools.Search -> {
-                            add(buildJsonObject {
-                                put("googleSearch", buildJsonObject {})
-                            })
-                        }
+                }
+                if (hasBuiltInTools) {
+                    params.model.tools.forEach { builtInTool ->
+                        when (builtInTool) {
+                            BuiltInTools.Search -> {
+                                add(buildJsonObject {
+                                    put("googleSearch", buildJsonObject {})
+                                })
+                            }
 
-                        BuiltInTools.UrlContext -> {
-                            add(buildJsonObject {
-                                put("urlContext", buildJsonObject {})
-                            })
-                        }
+                            BuiltInTools.UrlContext -> {
+                                add(buildJsonObject {
+                                    put("urlContext", buildJsonObject {})
+                                })
+                            }
 
-                        else -> {}
+                            else -> {}
+                        }
                     }
                 }
+            })
+        }
+        if (hasFunctionTools && hasBuiltInTools) {
+            put("toolConfig", buildJsonObject {
+                put("includeServerSideToolInvocations", true)
             })
         }
 
         // Safety Settings
         putJsonArray("safetySettings") {
-            add(buildJsonObject {
-                put("category", "HARM_CATEGORY_HARASSMENT")
-                put("threshold", "OFF")
-            })
-            add(buildJsonObject {
-                put("category", "HARM_CATEGORY_HATE_SPEECH")
-                put("threshold", "OFF")
-            })
-            add(buildJsonObject {
-                put("category", "HARM_CATEGORY_SEXUALLY_EXPLICIT")
-                put("threshold", "OFF")
-            })
-            add(buildJsonObject {
-                put("category", "HARM_CATEGORY_DANGEROUS_CONTENT")
-                put("threshold", "OFF")
-            })
-            add(buildJsonObject {
-                put("category", "HARM_CATEGORY_CIVIC_INTEGRITY")
-                put("threshold", "OFF")
-            })
+            safetyCategories.forEach { category ->
+                add(buildJsonObject {
+                    put("category", category)
+                    put("threshold", "OFF")
+                })
+            }
         }
     }.mergeCustomBody(params.customBody)
 
@@ -487,7 +554,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             message["role"]?.jsonPrimitive?.contentOrNull ?: "model"
         )
         val content = message["content"]?.jsonObject ?: error("No content")
-        val parts = content["parts"]?.jsonArray?.map { part ->
+        val parts = content["parts"]?.jsonArray?.mapNotNull { part ->
             parseMessagePart(part.jsonObject)
         } ?: emptyList()
 
@@ -518,15 +585,19 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         return chunks
     }
 
-    private fun parseMessagePart(jsonObject: JsonObject): UIMessagePart {
+    private fun parseMessagePart(jsonObject: JsonObject): UIMessagePart? {
         return when {
             jsonObject.containsKey("text") -> {
                 val thought = jsonObject["thought"]?.jsonPrimitive?.booleanOrNull ?: false
+                val thoughtSignature = jsonObject["thoughtSignature"]?.jsonPrimitive?.contentOrNull
                 val text = jsonObject["text"]?.jsonPrimitive?.content ?: ""
                 if (thought) UIMessagePart.Reasoning(
                     reasoning = text,
                     createdAt = Clock.System.now(),
-                    finishedAt = null
+                    finishedAt = null,
+                    metadata = thoughtSignature?.let {
+                        buildJsonObject { put("thoughtSignature", JsonPrimitive(it)) }
+                    },
                 ) else UIMessagePart.Text(text)
             }
 
@@ -560,12 +631,18 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                     )
                 }
                 UIMessagePart.Image(
+                    // Every other producer/consumer in this codebase (Base64ImageToLocalFileTransformer,
+                    // FileEncoder.encodeBase64, etc.) expects a proper data URL, not a bare payload -
+                    // see issue #37.
                     url = "data:$mime;base64,$data",
                     metadata = GoogleThoughtMetadata(thoughtSignature = thoughtSignature).toMetadata()
                 )
             }
 
-            else -> error("unknown message part type: $jsonObject")
+            else -> {
+                Log.w(TAG, "parseMessagePart: skipping unrecognized part, keys=${jsonObject.keys}")
+                null
+            }
         }
     }
 
@@ -586,22 +663,54 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     private fun JsonArrayBuilder.addModelMessage(message: UIMessage) {
         val groups = groupPartsByToolBoundary(message.parts)
         val partsBuffer = mutableListOf<JsonObject>()
+        // Forward thoughtSignature from any preceding Reasoning part to the next Tool
+        // part that doesn't already carry one. Gemini emits the signature on the thought
+        // (text + thought=true), but Reasoning parts are not sent back to Gemini in
+        // continuation requests — without forwarding, the next functionCall arrives
+        // unsigned and Gemini rejects with "Function call is missing a thought_signature
+        // in functionCall parts". Tracked across the message's parts list so cross-chunk
+        // streaming (thought in chunk N, functionCall in chunk N+1) still attaches the
+        // signature when the assistant message is finally serialized.
+        var carriedSig: String? = null
 
         for (group in groups) {
             when (group) {
                 is PartGroup.Content -> {
+                    // Track most recent reasoning signature for the next tool group.
+                    group.parts.forEach { part ->
+                        if (part is UIMessagePart.Reasoning) {
+                            part.metadata?.get("thoughtSignature")
+                                ?.jsonPrimitive?.contentOrNull
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { carriedSig = it }
+                        }
+                    }
                     group.parts.mapNotNull { it.toGooglePart() }.forEach { partsBuffer.add(it) }
                 }
 
                 is PartGroup.Tools -> {
                     // 添加 functionCall 到 parts 缓冲
-                    group.tools.forEach { partsBuffer.add(it.toFunctionCallPart()) }
+                    group.tools.forEach { tool ->
+                        val effective = if (
+                            tool.metadata?.get("thoughtSignature")?.jsonPrimitive?.contentOrNull.isNullOrBlank()
+                            && carriedSig != null
+                        ) {
+                            tool.copy(metadata = buildJsonObject {
+                                put("thoughtSignature", JsonPrimitive(carriedSig))
+                            })
+                        } else tool
+                        partsBuffer.add(effective.toFunctionCallPart())
+                    }
+                    carriedSig = null  // consumed by this tool group
 
-                    // 输出 model 消息
-                    add(buildJsonObject {
-                        put("role", "model")
-                        putJsonArray("parts") { partsBuffer.forEach { add(it) } }
-                    })
+                    // 输出 model 消息 (skip if every part dropped - an empty "parts" array is an
+                    // invalid Google payload, matching the guard on the tail flush below)
+                    if (partsBuffer.isNotEmpty()) {
+                        add(buildJsonObject {
+                            put("role", "model")
+                            putJsonArray("parts") { partsBuffer.forEach { add(it) } }
+                        })
+                    }
                     partsBuffer.clear()
 
                     // 紧跟 functionResponse
@@ -625,11 +734,13 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
     }
 
     private fun JsonArrayBuilder.addUserMessage(message: UIMessage) {
+        val parts = message.parts.mapNotNull { it.toGooglePart() }
+        // Skip the turn entirely if every part was dropped (e.g. an unencodable image) - an
+        // empty "parts" array is an invalid Google payload.
+        if (parts.isEmpty()) return
         add(buildJsonObject {
             put("role", commonRoleToGoogleRole(message.role))
-            putJsonArray("parts") {
-                message.parts.mapNotNull { it.toGooglePart() }.forEach { add(it) }
-            }
+            putJsonArray("parts") { parts.forEach { add(it) } }
         })
     }
 
@@ -639,7 +750,11 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
 
         is UIMessagePart.Image -> {
-            encodeBase64(false).getOrNull()?.let { encoded ->
+            val result = encodeBase64(false)
+            if (result.isFailure) {
+                logDroppedPart("Image", url)
+            }
+            result.getOrNull()?.let { encoded ->
                 buildJsonObject {
                     put("inlineData", buildJsonObject {
                         put("mimeType", encoded.mimeType)
@@ -653,7 +768,11 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
 
         is UIMessagePart.Video -> {
-            encodeBase64(false).getOrNull()?.let { base64Data ->
+            val result = encodeBase64(false)
+            if (result.isFailure) {
+                logDroppedPart("Video", url)
+            }
+            result.getOrNull()?.let { base64Data ->
                 buildJsonObject {
                     put("inlineData", buildJsonObject {
                         put("mimeType", "video/mp4")
@@ -664,7 +783,11 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         }
 
         is UIMessagePart.Audio -> {
-            encodeBase64(false).getOrNull()?.let { base64Data ->
+            val result = encodeBase64(false)
+            if (result.isFailure) {
+                logDroppedPart("Audio", url)
+            }
+            result.getOrNull()?.let { base64Data ->
                 buildJsonObject {
                     put("inlineData", buildJsonObject {
                         put("mimeType", "audio/mp3")
@@ -677,8 +800,18 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
         else -> null
     }
 
+    // Never log the payload itself - only the part type and the url scheme - so this stays safe
+    // even though the caller passes a base64 payload's URL.
+    private fun logDroppedPart(partType: String, url: String) {
+        val scheme = url.substringBefore(':', missingDelimiterValue = "none")
+        Log.w(TAG, "toGooglePart: dropping unencodable $partType part, url scheme=$scheme")
+    }
+
     private fun UIMessagePart.Tool.toFunctionCallPart() = buildJsonObject {
         put("functionCall", buildJsonObject {
+            if (toolCallId.isNotBlank()) {
+                put("id", toolCallId)
+            }
             put("name", toolName)
             put("args", inputAsJson())
         })
@@ -689,6 +822,9 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
 
     private fun UIMessagePart.Tool.toFunctionResponsePart() = buildJsonObject {
             put("functionResponse", buildJsonObject {
+                if (toolCallId.isNotBlank()) {
+                    put("id", toolCallId)
+                }
                 put("name", toolName)
 
                 // 1. 拆分出纯文本部分
@@ -765,5 +901,85 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
             totalTokens = totalTokens,
             cachedTokens = cachedTokens
         )
+    }
+
+    override suspend fun generateImage(
+        providerSetting: ProviderSetting,
+        params: ImageGenerationParams
+    ): Flow<ImageGenerationItem> = flow {
+        require(providerSetting is ProviderSetting.Google) {
+            "Expected Google provider setting"
+        }
+
+        val items = withContext(Dispatchers.IO) {
+            val requestBody = buildJsonObject {
+                putJsonArray("instances") {
+                    add(buildJsonObject {
+                        put("prompt", params.prompt)
+                    })
+                }
+                putJsonObject("parameters") {
+                    put("sampleCount", params.numOfImages)
+                    put(
+                        "aspectRatio", when (params.aspectRatio) {
+                            ImageAspectRatio.SQUARE -> "1:1"
+                            ImageAspectRatio.LANDSCAPE -> "16:9"
+                            ImageAspectRatio.PORTRAIT -> "9:16"
+                        }
+                    )
+                }
+            }.mergeCustomBody(params.customBody)
+
+            val url = buildUrl(
+                providerSetting = providerSetting,
+                path = if (providerSetting.vertexAI) {
+                    "publishers/google/models/${params.model.modelId}:predict"
+                } else {
+                    "models/${params.model.modelId}:predict"
+                }
+            )
+
+            val request = transformRequest(
+                providerSetting = providerSetting,
+                request = Request.Builder()
+                    .url(url)
+                    .headers(params.customHeaders.toHeaders())
+                    .post(
+                        json.encodeToString(requestBody).toRequestBody("application/json".toMediaType())
+                    )
+                    .configureReferHeaders(providerSetting.baseUrl)
+                    .build()
+            )
+
+            val response = client.newCall(request).await()
+            if (!response.isSuccessful) {
+                error("Failed to generate image: ${response.code} ${response.body.string()}")
+            }
+
+            val bodyStr = response.body.string()
+            val bodyJson = json.parseToJsonElement(bodyStr).jsonObject
+
+            val predictions = bodyJson["predictions"]?.jsonArray ?: error("No predictions in response")
+
+            predictions.mapNotNull { prediction ->
+                val predictionObj = prediction.jsonObject
+                val bytesBase64Encoded = predictionObj["bytesBase64Encoded"]?.jsonPrimitive?.contentOrNull
+
+                if (bytesBase64Encoded != null) {
+                    ImageGenerationItem(
+                        data = bytesBase64Encoded,
+                        mimeType = "image/png"
+                    )
+                } else {
+                    null
+                }
+            }
+        }
+
+        if (items.isEmpty()) error("No images in response (the model may have refused the prompt).")
+
+        items.forEach { item ->
+            emit(item)
+        }
     }
 }

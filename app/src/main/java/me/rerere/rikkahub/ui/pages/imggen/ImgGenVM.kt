@@ -9,6 +9,7 @@ import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
 import androidx.paging.map
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,7 +22,7 @@ import kotlinx.serialization.Serializable
 import me.rerere.ai.provider.ImageEditParams
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.ProviderManager
-import me.rerere.ai.ui.ImageGenSize
+import me.rerere.ai.ui.ImageAspectRatio
 import me.rerere.ai.ui.ImageGenerationItem
 import me.rerere.common.android.appTempFolder
 import me.rerere.rikkahub.data.datastore.SettingsStore
@@ -55,6 +56,18 @@ private fun GenMediaEntity.toGeneratedImage(filesManager: FilesManager): Generat
     )
 }
 
+/**
+ * Pure selection logic backing the gallery orphan purge (#39): given every persisted
+ * gen-media row and the images directory, returns the entities whose backing file no
+ * longer exists on disk. Resolves each entity's file exactly like [toGeneratedImage] does.
+ * Extracted as a top-level function so it's unit-testable without constructing the VM.
+ */
+internal fun selectOrphanedGenMedia(
+    entities: List<GenMediaEntity>,
+    imagesDir: File,
+): List<GenMediaEntity> =
+    entities.filter { entity -> !File(imagesDir, entity.path.removePrefix("images/")).exists() }
+
 class ImgGenVM(
     context: Application,
     val settingsStore: SettingsStore,
@@ -68,8 +81,8 @@ class ImgGenVM(
     private val _numberOfImages = MutableStateFlow(1)
     val numberOfImages: StateFlow<Int> = _numberOfImages
 
-    private val _size = MutableStateFlow(ImageGenSize.AUTO.value)
-    val size: StateFlow<String> = _size
+    private val _aspectRatio = MutableStateFlow(ImageAspectRatio.SQUARE)
+    val aspectRatio: StateFlow<ImageAspectRatio> = _aspectRatio
 
     private val _isGenerating = MutableStateFlow(false)
     val isGenerating: StateFlow<Boolean> = _isGenerating
@@ -94,6 +107,28 @@ class ImgGenVM(
         }
         .cachedIn(viewModelScope)
 
+    init {
+        purgeOrphanedGenMedia()
+    }
+
+    // One-shot purge of gallery entries whose backing file is missing (#39). Room
+    // invalidation refreshes the paging flow automatically, so this needs no extra wiring.
+    private fun purgeOrphanedGenMedia() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val entities = genMediaRepository.getAllMediaList()
+                val orphans = selectOrphanedGenMedia(entities, filesManager.getImagesDir())
+                orphans.forEach { genMediaRepository.deleteMedia(it.id) }
+                if (orphans.isNotEmpty()) {
+                    Log.i(TAG, "Purged ${orphans.size} orphaned gallery entries")
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) return@launch
+                Log.e(TAG, "Failed to purge orphaned gallery entries", e)
+            }
+        }
+    }
+
     fun updatePrompt(prompt: String) {
         _prompt.value = prompt
     }
@@ -102,8 +137,8 @@ class ImgGenVM(
         _numberOfImages.value = count.coerceIn(1, 4)
     }
 
-    fun updateSize(size: String) {
-        _size.value = size
+    fun updateAspectRatio(aspectRatio: ImageAspectRatio) {
+        _aspectRatio.value = aspectRatio
     }
 
     fun addReferenceImages(paths: List<String>) {
@@ -154,7 +189,7 @@ class ImgGenVM(
                     model = model,
                     prompt = requestPrompt,
                     numOfImages = _numberOfImages.value,
-                    size = _size.value,
+                    aspectRatio = _aspectRatio.value,
                     customHeaders = model.customHeaders,
                     customBody = model.customBodies
                 )
@@ -200,7 +235,7 @@ class ImgGenVM(
                     prompt = requestPrompt,
                     images = sourceImages,
                     numOfImages = _numberOfImages.value,
-                    size = _size.value,
+                    aspectRatio = _aspectRatio.value,
                     customHeaders = model.customHeaders,
                     customBody = model.customBodies
                 )

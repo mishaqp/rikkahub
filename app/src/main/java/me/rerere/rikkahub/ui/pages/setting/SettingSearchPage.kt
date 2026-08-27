@@ -29,6 +29,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -167,6 +168,11 @@ fun SettingSearchPage(vm: SettingVM = koinViewModel()) {
                     onUpdate = { options ->
                         vm.updateSettings(
                             settings.copy(searchCommonOptions = options)
+                        )
+                    },
+                    onUpdateWebFetchTools = { enabled ->
+                        vm.updateSettings(
+                            settings.copy(enableWebFetchTools = enabled)
                         )
                     }
                 )
@@ -308,7 +314,7 @@ private fun SearchProviderCard(
             IconButton(onClick = { showMenu = true }) {
                 Icon(
                     imageVector = HugeIcons.MoreVertical,
-                    contentDescription = null
+                    contentDescription = stringResource(R.string.accessibility_more_options)
                 )
                 DropdownMenu(
                     expanded = showMenu,
@@ -370,7 +376,8 @@ fun SearchAbilityTagLine(
 @Composable
 private fun CommonOptions(
     settings: me.rerere.rikkahub.data.datastore.Settings,
-    onUpdate: (SearchCommonOptions) -> Unit
+    onUpdate: (SearchCommonOptions) -> Unit,
+    onUpdateWebFetchTools: (Boolean) -> Unit
 ) {
     var commonOptions by remember(settings.searchCommonOptions) {
         mutableStateOf(settings.searchCommonOptions)
@@ -405,6 +412,21 @@ private fun CommonOptions(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+
+            FormItem(
+                label = {
+                    Text(stringResource(R.string.setting_page_search_web_fetch_tools_title))
+                },
+                description = {
+                    Text(stringResource(R.string.setting_page_search_web_fetch_tools_desc))
+                },
+                tail = {
+                    Switch(
+                        checked = settings.enableWebFetchTools,
+                        onCheckedChange = onUpdateWebFetchTools
+                    )
+                }
+            )
         }
     }
 }

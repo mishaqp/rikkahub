@@ -26,17 +26,12 @@ data class ConversationSizeInfo(
     val showWarning: Boolean
 )
 
-private val DefaultSizeInfo = ConversationSizeInfo(
-    nodeCount = 0,
-    lastAssistantInputTokens = 0,
-    exceedNodeCountThreshold = false,
-    exceedInputTokenThreshold = false,
-    showWarning = false
-)
-
 @Composable
 fun rememberConversationSizeInfo(conversation: Conversation): ConversationSizeInfo {
-    return remember(conversation.messageNodes) {
+    // Key by node count + last node's id to avoid list-reference comparison on every recomp.
+    val nodesKey = conversation.messageNodes.size.toString() +
+        (conversation.messageNodes.lastOrNull()?.id?.toString() ?: "")
+    return remember(nodesKey) {
         val nodeCount = conversation.messageNodes.size
         val lastAssistantInputTokens = conversation.messageNodes.asReversed()
             .map { it.currentMessage }

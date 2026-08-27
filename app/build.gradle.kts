@@ -4,14 +4,27 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.FileInputStream
 import java.util.Properties
 
+val geminiOauthClientSecret = providers.gradleProperty("geminiOauthClientSecret")
+    .orNull
+    .orEmpty()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
-    alias(libs.plugins.google.services)
-    alias(libs.plugins.firebase.crashlytics)
+    alias(libs.plugins.google.services) apply false
+    alias(libs.plugins.firebase.crashlytics) apply false
     alias(libs.plugins.baselineprofile)
+}
+
+// Preserve upstream Firebase support when a project-specific configuration is present,
+// while allowing an uncredentialed debug build of this fork in CI.
+if (file("google-services.json").isFile) {
+    apply(plugin = "com.google.gms.google-services")
+    apply(plugin = "com.google.firebase.crashlytics")
 }
 
 android {
@@ -23,7 +36,7 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 180
-        versionName = "2.4.13"
+        versionName = "2.4.13-agent-full"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -64,7 +77,17 @@ android {
                     storePassword = storePasswordValue
                     keyAlias = keyAliasValue
                     keyPassword = keyPasswordValue
+                } else {
+                    val missing = buildList {
+                        if (storeFilePath == null) add("storeFile")
+                        if (storePasswordValue == null) add("storePassword")
+                        if (keyAliasValue == null) add("keyAlias")
+                        if (keyPasswordValue == null) add("keyPassword")
+                    }
+                    logger.warn("Signing config: local.properties is missing $missing, release build will be unsigned")
                 }
+            } else {
+                logger.warn("Signing config: local.properties not found, release build will be unsigned")
             }
         }
     }
@@ -77,11 +100,15 @@ android {
             }
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
+            buildConfigField("String", "UPDATE_API_URL", "\"\"")
+            buildConfigField("String", "GEMINI_OAUTH_CLIENT_SECRET", "\"$geminiOauthClientSecret\"")
         }
         debug {
             applicationIdSuffix = ".debug"
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
+            buildConfigField("String", "UPDATE_API_URL", "\"\"")
+            buildConfigField("String", "GEMINI_OAUTH_CLIENT_SECRET", "\"$geminiOauthClientSecret\"")
         }
     }
     compileOptions {
@@ -91,9 +118,12 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        // agent-keyboard IPC (IKeyboardApi.aidl + EditorInfoBundle.aidl) and the Shizuku
+        // user service (IShizukuUserService.aidl) both live in src/main/aidl.
+        aidl = true
     }
     sourceSets {
-        getByName("androidTest").assets.srcDirs("$projectDir/schemas")
+        getByName("androidTest").assets.directories.add("$projectDir/schemas")
     }
     androidResources {
         generateLocaleConfig = true
@@ -103,6 +133,18 @@ android {
             useLegacyPackaging = true
             pickFirsts += "lib/*/libtermux.so"
         }
+    }
+    lint {
+        // FullBackupContent insists every <exclude> path lives under a previously
+        // <include>'d root. Our backup_rules.xml + data_extraction_rules.xml use
+        // include="upload/" + explicit excludes for databases / sharedpref /
+        // datastore/ / known_hosts / browser-profile/ / local-models/ as
+        // belt-and-suspenders defence: if anyone later adds a broader <include>
+        // (e.g. domain="root"), the excludes still keep credentials and
+        // multi-GB local LLM weights off the cloud-backup path. Lint reads that
+        // pattern as redundant; the runtime accepts it. Keep the rules; mute
+        // the check.
+        disable.add("FullBackupContent")
     }
     tasks.withType<KotlinCompile>().configureEach {
         compilerOptions.optIn.add("androidx.compose.material3.ExperimentalMaterial3Api")
@@ -147,6 +189,7 @@ dependencies {
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.browser)
     implementation(libs.androidx.profileinstaller)
+    implementation(libs.androidx.webkit)
     implementation(libs.termux.terminal.view)
     implementation(libs.guava.listenablefuture)
 
@@ -280,8 +323,25 @@ dependencies {
     // sqlite-android (requery SQLite for Android)
     implementation(libs.sqlite.android)
 
+    // Google Play Services Location (FusedLocationProvider)
+    implementation(libs.play.services.location)
+    // kotlinx.coroutines.tasks.await for Task<*> (was previously transitive via Firebase)
+    implementation(libs.kotlinx.coroutines.play.services)
+
+    // AndroidX Biometric (BiometricPrompt)
+    implementation(libs.androidx.biometric)
+
+    // AndroidX Media — MediaSessionCompat, MediaButtonReceiver, NotificationCompat.MediaStyle
+    implementation(libs.androidx.media)
+
+    // AndroidX DocumentFile — Phase 25 SAF tree traversal for the ExternalStorage tools
+    // (USB / SD / Downloads / cloud DocumentsProvider access via persisted tree grants).
+    implementation(libs.androidx.documentfile)
+
     // modules
     implementation(project(":ai"))
+    implementation(project(":local-llm"))
+    implementation(project(":llama-cpp"))
     implementation(project(":web"))
     implementation(project(":document"))
     implementation(project(":highlight"))
@@ -294,8 +354,17 @@ dependencies {
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.aar"))))
     implementation(kotlin("reflect"))
 
-    // Leak Canary
-    // debugImplementation(libs.leakcanary.android)
+    // SSH client (Mwiede fork — maintained, Android-friendly)
+    implementation(libs.jsch)
+
+    // Cron utilities (expression parsing & validation)
+    implementation(libs.cron.utils)
+
+    // Shizuku client — lets shizuku_exec run a shell command with the shell UID's
+    // privileges without root. :api is the client SDK; :provider ships ShizukuProvider,
+    // the ContentProvider that receives the binder from the Shizuku app.
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
 
     // tests
     testImplementation(libs.junit)

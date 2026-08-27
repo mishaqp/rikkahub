@@ -7,167 +7,161 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.launch
-import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.R
-import me.rerere.rikkahub.RouteActivity
-import org.koin.android.ext.android.inject
-import kotlin.uuid.Uuid
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "ChatGenerationFgs"
 
 /**
- * Keeps the app process in the foreground while one or more chat generations are active.
- *
- * Generation itself remains owned by [ChatService]. This service only provides the Android
- * foreground-service lifetime required for streaming to continue after the activity is hidden.
+ * Keeps an interactive generation alive after the UI is backgrounded. It owns no generation
+ * state; [ChatService] starts it before a request begins and stops it after the final task ends.
  */
 class ChatGenerationForegroundService : Service() {
-    companion object {
-        private const val ACTION_ACQUIRE = "me.rerere.rikkahub.action.CHAT_GENERATION_ACQUIRE"
-        private const val ACTION_RELEASE = "me.rerere.rikkahub.action.CHAT_GENERATION_RELEASE"
-        private const val EXTRA_GENERATION_ID = "generation_id"
-        private const val EXTRA_CONVERSATION_ID = "conversation_id"
-
-        const val NOTIFICATION_ID = 2002
-
-        fun acquire(context: Context, generationId: Uuid, conversationId: Uuid): Boolean {
-            val intent = Intent(context, ChatGenerationForegroundService::class.java).apply {
-                action = ACTION_ACQUIRE
-                putExtra(EXTRA_GENERATION_ID, generationId.toString())
-                putExtra(EXTRA_CONVERSATION_ID, conversationId.toString())
-            }
-            return runCatching {
-                ContextCompat.startForegroundService(context, intent)
-                true
-            }.onFailure {
-                Log.e(TAG, "Unable to start chat generation foreground service", it)
-            }.getOrDefault(false)
-        }
-
-        fun release(context: Context, generationId: Uuid) {
-            val intent = Intent(context, ChatGenerationForegroundService::class.java).apply {
-                action = ACTION_RELEASE
-                putExtra(EXTRA_GENERATION_ID, generationId.toString())
-            }
-            runCatching {
-                context.startService(intent)
-            }.onFailure {
-                Log.e(TAG, "Unable to release chat generation foreground service", it)
-            }
-        }
-    }
-
-    private val activeGenerations = linkedMapOf<String, String>()
-    private var isForeground = false
-    private val appScope: AppScope by inject()
-    private val chatService: ChatService by inject()
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_ACQUIRE -> acquire(intent)
-            ACTION_RELEASE -> release(intent)
-            else -> stopService()
+        // A stop request can race a subsequent Send. The shared desired-state flag makes a
+        // delayed stale stop a no-op instead of tearing down the foreground service for the
+        // newer generation.
+        if (!shouldRun.get()) {
+            readiness.markUnavailable()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            releaseWakeLock()
+            stopSelfResult(startId)
+            return START_NOT_STICKY
         }
-        return START_NOT_STICKY
+
+        if (!startForegroundCompat()) {
+            readiness.markUnavailable()
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        acquireWakeLock()
+        // Do not let ChatService open the streaming socket until both startForeground() and the
+        // partial wake lock are active. Merely calling startForegroundService() does not provide
+        // that ordering guarantee when the user presses Home immediately after Send.
+        readiness.markReady()
+        // An OEM may reclaim the service while the process remains alive. Sticky restart lets it
+        // reacquire the foreground notification and wake lock while work is still requested.
+        return START_STICKY
     }
 
     override fun onDestroy() {
-        activeGenerations.clear()
-        if (isForeground) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            isForeground = false
-        }
+        if (shouldRun.get()) readiness.markUnavailable()
+        releaseWakeLock()
         super.onDestroy()
     }
 
-    override fun onTimeout(startId: Int, fgsType: Int) {
-        Log.e(TAG, "Foreground service timed out (type=$fgsType)")
-        activeGenerations.values
-            .mapNotNull { runCatching { Uuid.parse(it) }.getOrNull() }
-            .distinct()
-            .forEach { conversationId ->
-                appScope.launch {
-                    chatService.stopGeneration(conversationId)
-                }
-            }
-        // Android only allows a few seconds after onTimeout before raising RemoteServiceException.
-        stopService()
-    }
-
-    private fun acquire(intent: Intent) {
-        val generationId = intent.getStringExtra(EXTRA_GENERATION_ID) ?: return stopService()
-        val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: return stopService()
-        activeGenerations[generationId] = conversationId
-        updateForegroundNotification(conversationId)
-    }
-
-    private fun release(intent: Intent) {
-        intent.getStringExtra(EXTRA_GENERATION_ID)?.let(activeGenerations::remove)
-        if (activeGenerations.isEmpty()) {
-            stopService()
-        } else {
-            updateForegroundNotification(activeGenerations.values.last())
-        }
-    }
-
-    private fun updateForegroundNotification(conversationId: String) {
-        try {
-            val notification = buildNotification(conversationId)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-            isForeground = true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to enter foreground", e)
-            activeGenerations.clear()
-            stopSelf()
-        }
-    }
-
-    private fun stopService() {
-        if (isForeground) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            isForeground = false
-        }
-        stopSelf()
-    }
-
-    private fun buildNotification(conversationId: String) =
-        NotificationCompat.Builder(this, CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_rikkahub)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.notification_live_update_title))
-            .setContentIntent(getConversationPendingIntent(conversationId))
-            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+    private fun startForegroundCompat(): Boolean = try {
+        val notificationBuilder = NotificationCompat.Builder(this, CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.drawable.small_icon)
+            .setContentTitle(getString(R.string.notification_live_update_title))
+            .setContentText(getString(R.string.app_name))
+            .setContentIntent(buildLaunchPendingIntent())
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .build()
-
-    private fun getConversationPendingIntent(conversationId: String): PendingIntent {
-        val intent = Intent(this, RouteActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("conversationId", conversationId)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            notificationBuilder.setRequestPromotedOngoing(true)
         }
-        return PendingIntent.getActivity(
-            this,
-            NOTIFICATION_ID,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
+        if (Build.VERSION.SDK_INT >= 36) {
+            notificationBuilder.setShortCriticalText(
+                getString(R.string.notification_live_update_chip_thinking)
+            )
+        }
+        val notification = notificationBuilder.build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        true
+    } catch (error: Exception) {
+        // Generation keeps running on the app scope when an OEM rejects the FGS request. The
+        // failure is logged because the device's battery policy can then still interrupt it.
+        Log.w(TAG, "Unable to start chat-generation foreground service", error)
+        false
+    }
+
+    private fun buildLaunchPendingIntent(): PendingIntent = PendingIntent.getActivity(
+        this,
+        0,
+        packageManager.getLaunchIntentForPackage(packageName),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
+    private fun acquireWakeLock() {
+        val lock = wakeLock ?: getSystemService(PowerManager::class.java)
+            ?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rikkahub:chat_generation")
+            ?.also {
+                it.setReferenceCounted(false)
+                wakeLock = it
+            }
+            ?: return
+        if (!lock.isHeld) lock.acquire()
+    }
+
+    private fun releaseWakeLock() {
+        runCatching {
+            wakeLock?.takeIf { it.isHeld }?.release()
+        }.onFailure { Log.w(TAG, "Unable to release chat-generation wake lock", it) }
+        wakeLock = null
+    }
+
+    companion object {
+        private const val ACTION_RECONCILE = "me.rerere.rikkahub.action.RECONCILE_CHAT_GENERATION_FGS"
+        private const val NOTIFICATION_ID = 2002
+        private const val STARTUP_TIMEOUT_MS = 5_000L
+        private val shouldRun = AtomicBoolean(false)
+        private val readiness = ForegroundServiceReadiness()
+
+        fun start(context: Context) {
+            shouldRun.set(true)
+            readiness.requestStart()
+            runCatching {
+                ContextCompat.startForegroundService(
+                    context.applicationContext,
+                    Intent(context, ChatGenerationForegroundService::class.java).apply {
+                        action = ACTION_RECONCILE
+                    },
+                )
+            }.onFailure {
+                readiness.markUnavailable()
+                Log.w(TAG, "Unable to request chat-generation foreground service", it)
+            }
+        }
+
+        suspend fun awaitReady(): Boolean = readiness.awaitReady(STARTUP_TIMEOUT_MS)
+
+        fun stop(context: Context) {
+            shouldRun.set(false)
+            readiness.requestStop()
+            val serviceIntent = Intent(context, ChatGenerationForegroundService::class.java).apply {
+                action = ACTION_RECONCILE
+            }
+            runCatching {
+                // This delivers an ordered state reconciliation to an already-running FGS.
+                // It avoids stopService() racing a new start and killing its service instance.
+                context.applicationContext.startService(serviceIntent)
+            }.recoverCatching {
+                // If the platform refuses a normal background start, there is no active work
+                // left according to the tracker, so a direct stop is safe as a last resort.
+                context.applicationContext.stopService(serviceIntent)
+            }.onFailure { Log.w(TAG, "Unable to stop chat-generation foreground service", it) }
+        }
     }
 }

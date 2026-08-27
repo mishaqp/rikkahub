@@ -38,6 +38,8 @@ rootProject.name = "rikkahub"
 include(":app")
 include(":highlight")
 include(":ai")
+include(":local-llm")
+include(":llama-cpp")
 include(":search")
 include(":speech")
 include(":common")

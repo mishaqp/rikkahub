@@ -33,10 +33,10 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
@@ -59,14 +59,16 @@ import com.dokar.sonner.Toaster
 import com.dokar.sonner.rememberToasterState
 import kotlinx.serialization.Serializable
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.datastore.DEFAULT_CODEX_PROVIDER_ID
+import me.rerere.rikkahub.data.datastore.DEFAULT_GEMINI_OAUTH_PROVIDER_ID
 import me.rerere.rikkahub.data.db.DatabaseMigrationTracker
 import me.rerere.rikkahub.data.db.MigrationState
 import me.rerere.rikkahub.data.event.AppEvent
 import me.rerere.rikkahub.data.event.AppEventBus
 import me.rerere.rikkahub.ui.activity.SafeModeActivity
 import me.rerere.rikkahub.ui.components.ui.TTSController
-import me.rerere.rikkahub.ui.context.LocalASRState
 import me.rerere.rikkahub.ui.context.LocalNavController
+import me.rerere.rikkahub.ui.context.LocalASRState
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.context.LocalSharedTransitionScope
 import me.rerere.rikkahub.ui.context.LocalTTSState
@@ -74,8 +76,8 @@ import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.context.Navigator
 import me.rerere.rikkahub.ui.hooks.readBooleanPreference
 import me.rerere.rikkahub.ui.hooks.readStringPreference
-import me.rerere.rikkahub.ui.hooks.rememberCustomAsrState
 import me.rerere.rikkahub.ui.hooks.rememberCustomTtsState
+import me.rerere.rikkahub.ui.hooks.rememberCustomAsrState
 import me.rerere.rikkahub.ui.pages.assistant.AssistantPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantBasicPage
 import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantDetailPage
@@ -88,14 +90,15 @@ import me.rerere.rikkahub.ui.pages.assistant.detail.AssistantRequestPage
 import me.rerere.rikkahub.ui.pages.backup.BackupPage
 import me.rerere.rikkahub.ui.pages.chat.ChatPage
 import me.rerere.rikkahub.ui.pages.debug.DebugPage
+import me.rerere.rikkahub.ui.pages.developer.DeveloperPage
 import me.rerere.rikkahub.ui.pages.extensions.ExtensionsPage
 import me.rerere.rikkahub.ui.pages.extensions.PromptPage
 import me.rerere.rikkahub.ui.pages.extensions.QuickMessagesPage
 import me.rerere.rikkahub.ui.pages.extensions.skills.SkillDetailPage
 import me.rerere.rikkahub.ui.pages.extensions.skills.SkillsPage
-import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspacePage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceDetailPage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceFileEditorPage
+import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspacePage
 import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalPage
 import me.rerere.workspace.WorkspaceStorageArea
 import me.rerere.rikkahub.ui.pages.favorite.FavoritePage
@@ -104,6 +107,9 @@ import me.rerere.rikkahub.ui.pages.imggen.ImageGenPage
 import me.rerere.rikkahub.ui.pages.log.LogPage
 import me.rerere.rikkahub.ui.pages.search.SearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingAboutPage
+import me.rerere.rikkahub.ui.pages.setting.SettingAccessibilityPage
+import me.rerere.rikkahub.ui.pages.setting.SettingNotificationsPage
+import me.rerere.rikkahub.ui.pages.setting.SettingPermissionsPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesThemePage
 import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesNotificationPage
@@ -120,7 +126,11 @@ import me.rerere.rikkahub.ui.pages.setting.SettingProviderDetailPage
 import me.rerere.rikkahub.ui.pages.setting.SettingProviderPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSearchDetailPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSearchPage
+import me.rerere.rikkahub.ui.pages.setting.SettingsSearchPage
+import me.rerere.rikkahub.ui.pages.setting.SettingTTSPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSpeechPage
+import me.rerere.rikkahub.ui.pages.setting.SettingSubAgentsPage
+import me.rerere.rikkahub.ui.pages.setting.SettingTelegramPage
 import me.rerere.rikkahub.ui.pages.setting.SettingWebPage
 import me.rerere.rikkahub.ui.pages.share.handler.ShareHandlerPage
 import me.rerere.rikkahub.ui.pages.stats.StatsPage
@@ -129,7 +139,7 @@ import me.rerere.rikkahub.ui.pages.webview.WebViewPage
 import me.rerere.rikkahub.ui.theme.LocalDarkMode
 import me.rerere.rikkahub.ui.theme.RikkahubTheme
 import me.rerere.rikkahub.utils.CrashHandler
-import me.rerere.rikkahub.utils.openUsageAccessSettings
+import me.rerere.rikkahub.utils.resolveInitialChatStack
 import okhttp3.OkHttpClient
 import org.koin.android.ext.android.inject
 import org.koin.compose.koinInject
@@ -138,6 +148,11 @@ import kotlin.uuid.Uuid
 private const val TAG = "RouteActivity"
 
 class RouteActivity : ComponentActivity() {
+    companion object {
+        const val EXTRA_OPEN_CODEX_SETTINGS = "open_codex_settings"
+        const val EXTRA_OPEN_GEMINI_SETTINGS = "open_gemini_settings"
+    }
+
     private val okHttpClient by inject<OkHttpClient>()
     private val settingsStore by inject<SettingsStore>()
     private var navStack: MutableList<NavKey>? = null
@@ -169,16 +184,15 @@ class RouteActivity : ComponentActivity() {
         }
         setContent {
             RikkahubTheme {
+                @OptIn(coil3.annotation.ExperimentalCoilApi::class)
                 setSingletonImageLoaderFactory { context ->
                     ImageLoader.Builder(context)
                         .crossfade(true)
                         .components {
-                            add(
-                                OkHttpNetworkFetcherFactory(
-                                    callFactory = { okHttpClient },
-                                    cacheStrategy = { CacheControlCacheStrategy() },
-                                )
-                            )
+                            add(OkHttpNetworkFetcherFactory(
+                                callFactory = { okHttpClient },
+                                cacheStrategy = { CacheControlCacheStrategy() },
+                            ))
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                                 add(AnimatedImageDecoder.Factory())
                             } else {
@@ -228,9 +242,25 @@ class RouteActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_OPEN_CODEX_SETTINGS, false)) {
+            val destination = Screen.SettingProviderDetail(DEFAULT_CODEX_PROVIDER_ID.toString())
+            navStack?.let { stack ->
+                if (stack.lastOrNull() != destination) stack.add(destination)
+            }
+            intent.removeExtra(EXTRA_OPEN_CODEX_SETTINGS)
+        }
+        if (intent.getBooleanExtra(EXTRA_OPEN_GEMINI_SETTINGS, false)) {
+            val destination = Screen.SettingProviderDetail(DEFAULT_GEMINI_OAUTH_PROVIDER_ID.toString())
+            navStack?.let { stack ->
+                if (stack.lastOrNull() != destination) stack.add(destination)
+            }
+            intent.removeExtra(EXTRA_OPEN_GEMINI_SETTINGS)
+        }
         // Navigate to the chat screen if a conversation ID is provided
         intent.getStringExtra("conversationId")?.let { text ->
             navStack?.add(Screen.Chat(text))
+            intent.removeExtra("conversationId")
         }
     }
 
@@ -246,28 +276,50 @@ class RouteActivity : ComponentActivity() {
             eventBus.events.collect { event ->
                 when (event) {
                     is AppEvent.Speak -> tts.speak(event.text)
-                    is AppEvent.OpenUsageAccessSettings -> this@RouteActivity.openUsageAccessSettings()
-                    is AppEvent.McpOAuthCallback -> Unit // 由 McpManager 消费
-                    is AppEvent.ChatGenerationUpdate -> Unit // 由 ChatNotificationManager 消费
-                    is AppEvent.ChatGenerationEnded -> Unit // 由 ChatNotificationManager 消费
+                    else -> {}
                 }
             }
         }
         val migrationState by DatabaseMigrationTracker.state.collectAsStateWithLifecycle()
 
-        val startScreen = Screen.Chat(
-            id = if (readBooleanPreference("create_new_conversation_on_start", true)) {
-                Uuid.random().toString()
-            } else {
-                readStringPreference(
-                    "lastConversationId",
-                    Uuid.random().toString()
-                ) ?: Uuid.random().toString()
-            }
-        )
+        // Resolve once per composition (not on every recomposition) so a later removeExtra()
+        // of "conversationId" can't flip which rememberNavBackStack() branch below gets called.
+        val deepLinkConversationId = remember { intent?.getStringExtra("conversationId") }
+        val initialChatIds = remember {
+            resolveInitialChatStack(
+                deepLinkConversationId = deepLinkConversationId,
+                createNewOnStart = readBooleanPreference("create_new_conversation_on_start", true),
+                lastConversationId = readStringPreference("lastConversationId", null),
+                newId = { Uuid.random().toString() },
+            )
+        }
 
-        val backStack = rememberNavBackStack(startScreen)
+        val backStack = if (initialChatIds.size > 1) {
+            rememberNavBackStack(Screen.Chat(initialChatIds[0]), Screen.Chat(initialChatIds[1]))
+        } else {
+            rememberNavBackStack(Screen.Chat(initialChatIds[0]))
+        }
         SideEffect { this@RouteActivity.navStack = backStack }
+
+        LaunchedEffect(backStack) {
+            if (intent.getBooleanExtra(EXTRA_OPEN_CODEX_SETTINGS, false)) {
+                val destination = Screen.SettingProviderDetail(DEFAULT_CODEX_PROVIDER_ID.toString())
+                if (backStack.lastOrNull() != destination) backStack.add(destination)
+                intent.removeExtra(EXTRA_OPEN_CODEX_SETTINGS)
+            }
+            if (intent.getBooleanExtra(EXTRA_OPEN_GEMINI_SETTINGS, false)) {
+                val destination =
+                    Screen.SettingProviderDetail(DEFAULT_GEMINI_OAUTH_PROVIDER_ID.toString())
+                if (backStack.lastOrNull() != destination) backStack.add(destination)
+                intent.removeExtra(EXTRA_OPEN_GEMINI_SETTINGS)
+            }
+            // Deep link was already consumed into the initial back stack above; clear it so a
+            // future recreation with the same Intent doesn't re-push it (mirrors how
+            // EXTRA_OPEN_CODEX_SETTINGS is cleared above).
+            if (deepLinkConversationId != null) {
+                intent.removeExtra("conversationId")
+            }
+        }
 
         ShareHandler(backStack)
 
@@ -320,7 +372,7 @@ class RouteActivity : ComponentActivity() {
                         entryProvider = entryProvider {
                             entry<Screen.Chat>(
                                 metadata = NavDisplay.transitionSpec { fadeIn() togetherWith fadeOut() }
-                                    + NavDisplay.popTransitionSpec { fadeIn() togetherWith fadeOut() }
+                                        + NavDisplay.popTransitionSpec { fadeIn() togetherWith fadeOut() }
                             ) { key ->
                                 ChatPage(
                                     id = Uuid.parse(key.id),
@@ -389,6 +441,10 @@ class RouteActivity : ComponentActivity() {
                                 SettingPage()
                             }
 
+                            entry<Screen.SettingsSearch> {
+                                SettingsSearchPage()
+                            }
+
                             entry<Screen.Backup> {
                                 BackupPage()
                             }
@@ -450,6 +506,9 @@ class RouteActivity : ComponentActivity() {
                                 SettingSearchPage()
                             }
 
+                            entry<Screen.SettingTTS> {
+                                SettingTTSPage()
+                            }
                             entry<Screen.SettingSearchDetail> { key ->
                                 val id = Uuid.parse(key.serviceId)
                                 SettingSearchDetailPage(id)
@@ -463,6 +522,10 @@ class RouteActivity : ComponentActivity() {
                                 SettingMcpPage()
                             }
 
+                            entry<Screen.SettingSubAgents> {
+                                SettingSubAgentsPage()
+                            }
+
                             entry<Screen.SettingDonate> {
                                 SettingDonatePage()
                             }
@@ -473,6 +536,62 @@ class RouteActivity : ComponentActivity() {
 
                             entry<Screen.SettingWeb> {
                                 SettingWebPage()
+                            }
+
+                            entry<Screen.SettingTelegram> {
+                                SettingTelegramPage()
+                            }
+
+                            entry<Screen.SettingWorkflows> {
+                                me.rerere.rikkahub.workflow.ui.WorkflowsScreen()
+                            }
+
+                            entry<Screen.WorkflowDetail> { key ->
+                                me.rerere.rikkahub.workflow.ui.WorkflowDetailScreen(workflowId = key.id)
+                            }
+
+                            entry<Screen.SettingScheduledJobs> {
+                                me.rerere.rikkahub.ui.pages.setting.scheduledjobs.ScheduledJobsScreen()
+                            }
+
+                            entry<Screen.SettingBrowser> {
+                                me.rerere.rikkahub.ui.pages.setting.browser.SettingBrowserPage()
+                            }
+
+                            entry<Screen.SettingTermux> {
+                                me.rerere.rikkahub.ui.pages.setting.termux.SettingTermuxPage()
+                            }
+
+                            entry<Screen.SettingShizuku> {
+                                me.rerere.rikkahub.ui.pages.setting.shizuku.SettingShizukuPage()
+                            }
+
+                            entry<Screen.ScheduledJobDetail> { key ->
+                                me.rerere.rikkahub.ui.pages.setting.scheduledjobs.ScheduledJobDetailScreen(jobId = key.id)
+                            }
+
+                            entry<Screen.SettingDoctor> {
+                                me.rerere.rikkahub.ui.pages.setting.doctor.DoctorScreen()
+                            }
+
+                            entry<Screen.SettingToolApprovals> {
+                                me.rerere.rikkahub.ui.pages.setting.SettingToolApprovalsPage()
+                            }
+
+                            entry<Screen.SettingAccessibility> {
+                                SettingAccessibilityPage()
+                            }
+
+                            entry<Screen.SettingNotifications> {
+                                SettingNotificationsPage()
+                            }
+
+                            entry<Screen.SettingPermissions> {
+                                SettingPermissionsPage()
+                            }
+
+                            entry<Screen.Developer> {
+                                DeveloperPage()
                             }
 
                             entry<Screen.Debug> {
@@ -530,6 +649,7 @@ class RouteActivity : ComponentActivity() {
                             entry<Screen.Stats> {
                                 StatsPage()
                             }
+
                         }
                     )
                     if (BuildConfig.DEBUG) {
@@ -632,6 +752,9 @@ sealed interface Screen : NavKey {
     data object Setting : Screen
 
     @Serializable
+    data object SettingsSearch : Screen
+
+    @Serializable
     data object Backup : Screen
 
     @Serializable
@@ -677,6 +800,9 @@ sealed interface Screen : NavKey {
     data object SettingSearch : Screen
 
     @Serializable
+    data object SettingTTS : Screen
+
+    @Serializable
     data class SettingSearchDetail(val serviceId: String) : Screen
 
     @Serializable
@@ -686,6 +812,9 @@ sealed interface Screen : NavKey {
     data object SettingMcp : Screen
 
     @Serializable
+    data object SettingSubAgents : Screen
+
+    @Serializable
     data object SettingDonate : Screen
 
     @Serializable
@@ -693,6 +822,48 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SettingWeb : Screen
+
+    @Serializable
+    data object SettingTelegram : Screen
+
+    @Serializable
+    data object SettingWorkflows : Screen
+
+    @Serializable
+    data class WorkflowDetail(val id: String) : Screen
+
+    @Serializable
+    data object SettingScheduledJobs : Screen
+
+    @Serializable
+    data object SettingBrowser : Screen
+
+    @Serializable
+    data object SettingTermux : Screen
+
+    @Serializable
+    data object SettingShizuku : Screen
+
+    @Serializable
+    data class ScheduledJobDetail(val id: String) : Screen
+
+    @Serializable
+    data object SettingDoctor : Screen
+
+    @Serializable
+    data object SettingToolApprovals : Screen
+
+    @Serializable
+    data object SettingAccessibility : Screen
+
+    @Serializable
+    data object SettingNotifications : Screen
+
+    @Serializable
+    data object SettingPermissions : Screen
+
+    @Serializable
+    data object Developer : Screen
 
     @Serializable
     data object Debug : Screen
@@ -732,4 +903,5 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object Stats : Screen
+
 }

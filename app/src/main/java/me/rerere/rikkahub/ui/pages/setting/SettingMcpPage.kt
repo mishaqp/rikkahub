@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")  // FlowRowOverflow deprecated; no replacement in current Compose
+
 package me.rerere.rikkahub.ui.pages.setting
 
 import androidx.compose.animation.animateContentSize
@@ -787,7 +789,7 @@ private fun McpCommonOptionsConfigure(
                                     IconButton(onClick = { headerValueVisible = !headerValueVisible }) {
                                         Icon(
                                             if (headerValueVisible) HugeIcons.ViewOff else HugeIcons.View,
-                                            contentDescription = null
+                                            contentDescription = stringResource(if (headerValueVisible) R.string.accessibility_hide_password else R.string.accessibility_show_password)
                                         )
                                     }
                                 },
@@ -954,7 +956,7 @@ private fun McpToolCard(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
-                        text = "启用",
+                        text = stringResource(R.string.setting_mcp_page_enable),
                         style = MaterialTheme.typography.labelSmall,
                     )
                     Switch(
@@ -970,7 +972,7 @@ private fun McpToolCard(
                 ) {
                     Icon(
                         if (expanded) HugeIcons.ArrowUp01 else HugeIcons.ArrowDown01,
-                        contentDescription = null,
+                        contentDescription = stringResource(if (expanded) R.string.code_block_collapse else R.string.code_block_expand),
                         modifier = Modifier.size(16.dp)
                     )
                 }

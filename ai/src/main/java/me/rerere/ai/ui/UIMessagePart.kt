@@ -187,6 +187,16 @@ sealed class UIMessagePart {
         val input: String,
         val output: List<UIMessagePart> = emptyList(),
         val approvalState: ToolApprovalState = ToolApprovalState.Auto,
+        /**
+         * Unix-millisecond timestamp set by [GenerationHandler] right before it actually
+         * starts running the tool's `execute` body. Persisted before execution begins so
+         * that on a process kill mid-execute, the post-restart replay can detect that a
+         * previous attempt started but didn't complete (output is empty + this is set)
+         * and refuse to silently re-run the tool — re-running could double-charge a
+         * remote, double-send a message, or duplicate any other side effect. Null means
+         * "never started" (Approved-but-not-yet-tried).
+         */
+        val executionStartedAt: Long? = null,
         override var metadata: JsonObject? = null
     ) : UIMessagePart() {
         /** Whether the tool has been executed (has output) */
@@ -198,6 +208,16 @@ sealed class UIMessagePart {
         /** Whether generation can resume and handle this tool immediately */
         val canResumeExecution: Boolean get() = !isExecuted && approvalState.canResumeToolExecution()
 
+        /**
+         * True iff a previous execution attempt was interrupted: approvalState is Approved,
+         * output is empty, and executionStartedAt is set. The resume path uses this to
+         * synthesise a "we don't know whether the side effect happened" Denied envelope
+         * instead of re-running.
+         */
+        val isInterruptedAttempt: Boolean
+            get() = approvalState is ToolApprovalState.Approved &&
+                output.isEmpty() && executionStartedAt != null
+
         /** Parse input string as JsonElement */
         fun inputAsJson(): JsonElement = runCatching {
             json.parseToJsonElement(input.ifBlank { "{}" })
@@ -206,10 +226,11 @@ sealed class UIMessagePart {
         fun merge(other: Tool): Tool {
             return Tool(
                 toolCallId = toolCallId,
-                toolName = toolName + other.toolName,
+                toolName = if (other.toolName.isBlank()) toolName else other.toolName,
                 input = input + other.input,
                 output = output + other.output,
                 approvalState = approvalState,
+                executionStartedAt = executionStartedAt ?: other.executionStartedAt,
                 metadata = if (other.metadata != null) other.metadata else metadata,
             )
         }

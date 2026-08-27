@@ -1,9 +1,13 @@
 package me.rerere.ai.util
 
 import android.content.Context
+import android.util.Log
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.util.concurrent.Executors
+
+private const val TAG = "KeyRoulette"
 
 interface KeyRoulette {
     fun next(keys: String, providerId: String = ""): String
@@ -49,6 +53,25 @@ private object LruFileLock
 // 文件结构: Map<providerId, Map<apiKey, lastUsedTimestamp>>
 private typealias LruCache = Map<String, Map<String, Long>>
 
+// In-memory mirror of the last known persisted state, guarded by LruFileLock. There
+// can be one LruKeyRoulette instance per provider (Claude, OpenAI, Google, ...), all
+// sharing the same on-disk file, so this has to be shared at file scope — not a field
+// on the class — for next() calls on different instances to stay read-after-write
+// consistent with each other without re-reading the file on every call.
+private var memoryCache: LruCache? = null
+
+// next() used to write the LRU cache to disk synchronously on every call, blocking
+// whichever thread built the request (streamText's callbackFlow body isn't always on
+// Dispatchers.IO). The selection itself must stay synchronous — next() returns the
+// chosen key immediately, callers need it right away — but the disk write doesn't need
+// to happen before next() returns. Route it through a single-threaded executor so
+// writes still land in call order (submission happens inside the synchronized block,
+// i.e. in the same order calls to next() were serialized) without blocking next()
+// itself on file I/O.
+private val writeExecutor = Executors.newSingleThreadExecutor { runnable ->
+    Thread(runnable, "LruKeyRoulette-writer").apply { isDaemon = true }
+}
+
 private class LruKeyRoulette(
     private val context: Context,
 ) : KeyRoulette {
@@ -59,7 +82,7 @@ private class LruKeyRoulette(
 
         synchronized(LruFileLock) {
             val now = System.currentTimeMillis()
-            val allCache = loadCache().toMutableMap()
+            val allCache = (memoryCache ?: loadCache()).toMutableMap()
 
             // 取本 provider 的记录，过滤掉已过期条目和不在当前 key 列表中的条目
             val providerCache = (allCache[providerId] ?: emptyMap())
@@ -78,7 +101,8 @@ private class LruKeyRoulette(
                 id != providerId && cache.values.all { now - it >= EXPIRE_DURATION_MS }
             }
 
-            saveCache(allCache)
+            memoryCache = allCache
+            writeExecutor.execute { saveCache(allCache) }
             return selected
         }
     }
@@ -88,7 +112,8 @@ private class LruKeyRoulette(
             val file = File(context.cacheDir, LRU_CACHE_FILE)
             if (!file.exists()) return emptyMap()
             Json.decodeFromString(file.readText())
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "loadCache: failed to read LRU key cache, starting empty", e)
             emptyMap()
         }
     }
@@ -96,7 +121,8 @@ private class LruKeyRoulette(
     private fun saveCache(cache: LruCache) {
         try {
             File(context.cacheDir, LRU_CACHE_FILE).writeText(Json.encodeToString(cache))
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "saveCache: failed to persist LRU key cache", e)
         }
     }
 }

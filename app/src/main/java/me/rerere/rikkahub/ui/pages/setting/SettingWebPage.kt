@@ -56,8 +56,8 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
-import me.rerere.rikkahub.ui.components.ui.permission.PermissionLocalNetwork
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionManager
+import me.rerere.rikkahub.ui.components.ui.permission.PermissionLocalNetwork
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionNotification
 import me.rerere.rikkahub.ui.components.ui.permission.rememberPermissionState
 import me.rerere.rikkahub.ui.context.LocalSettings
@@ -76,6 +76,7 @@ fun SettingWebPage() {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    @Suppress("DEPRECATION")  // LocalClipboard requires a suspend-friendly callsite refactor
     val clipboardManager = LocalClipboardManager.current
     val toaster = LocalToaster.current
     val copiedText = stringResource(R.string.copied)
@@ -94,6 +95,8 @@ fun SettingWebPage() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(PermissionNotification)
             }
+            // Android 17 gates LAN sockets behind ACCESS_LOCAL_NETWORK; only
+            // request when the user has chosen non-localhost mode.
             if (Build.VERSION.SDK_INT >= 37 && !settings.webServerLocalhostOnly) {
                 add(PermissionLocalNetwork)
             }
@@ -292,7 +295,7 @@ fun SettingWebPage() {
                                     IconButton(onClick = { passwordVisible = !passwordVisible }) {
                                         Icon(
                                             imageVector = if (passwordVisible) HugeIcons.ViewOff else HugeIcons.View,
-                                            contentDescription = null
+                                            contentDescription = stringResource(if (passwordVisible) R.string.accessibility_hide_password else R.string.accessibility_show_password)
                                         )
                                     }
                                 },

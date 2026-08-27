@@ -39,6 +39,7 @@ data class RootfsInstallProgress(
 data class WorkspaceConfig(
     val maxReadBytes: Long = 512 * 1024,
     val maxWriteBytes: Long = 2 * 1024 * 1024,
+    val maxImportBytes: Long = 256L * 1024 * 1024,
     val maxListEntries: Int = 500,
     val maxSearchResults: Int = 100,
 )
@@ -55,6 +56,20 @@ data class WorkspaceSearchMatch(
     val path: String,
     val line: Int,
     val text: String,
+)
+
+/** 递归目录树的一个条目, [depth] 相对于树的起点目录, 直接子项为 1 */
+data class WorkspaceTreeEntry(
+    val path: String,
+    val name: String,
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val depth: Int,
+)
+
+data class WorkspaceTreeResult(
+    val entries: List<WorkspaceTreeEntry>,
+    val truncated: Boolean,
 )
 
 data class WorkspaceCommandResult(

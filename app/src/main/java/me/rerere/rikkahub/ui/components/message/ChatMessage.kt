@@ -65,6 +65,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
+import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
@@ -100,8 +101,18 @@ import kotlin.time.Duration.Companion.milliseconds
 @Composable
 fun ChatMessage(
     node: MessageNode,
+    // Tolerant default: node.currentMessage throws when selectIndex is stale, and a default
+    // argument is evaluated before the body runs, so the guard below could never catch it.
+    displayMessage: UIMessage = node.messages.getOrNull(node.selectIndex)
+        ?: node.messages.lastOrNull()
+        ?: UIMessage.assistant(""),
     modifier: Modifier = Modifier,
     loading: Boolean = false,
+    // Whether a generation is running anywhere in this conversation, independent of
+    // `loading` (which the caller narrows to this node being the last message) - see the
+    // rerun-button gate in ChatMessageToolStep, which must not show while any generation
+    // is in flight, not just one on this exact message.
+    generationActive: Boolean = loading,
     model: Model? = null,
     assistant: Assistant? = null,
     lastMessage: Boolean = false,
@@ -115,10 +126,16 @@ fun ChatMessage(
     onToggleFavorite: (() -> Unit)? = null,
     onTranslate: ((UIMessage, Locale) -> Unit)? = null,
     onClearTranslation: (UIMessage) -> Unit = {},
-    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
+    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    onRerunTool: (suspend (toolCallId: String) -> me.rerere.rikkahub.service.ChatService.RerunToolResult)? = null,
 ) {
-    val message = node.messages[node.selectIndex]
+    // node.selectIndex can be stale (e.g. after a branch/message was removed) or the
+    // node can be empty; degrade to the last message, or render nothing, instead of
+    // crashing with an IndexOutOfBoundsException.
+    if (node.messages.isEmpty()) return
+    val message = displayMessage
+    val actionMessage = node.messages.getOrNull(node.selectIndex) ?: node.messages.last()
     val settings = LocalSettings.current.displaySetting
     val chatFontFamily = LocalChatFontFamily.current ?: rememberChatFontFamily(settings)
     val textStyle = LocalTextStyle.current.copy(
@@ -165,9 +182,11 @@ fun ChatMessage(
                 parts = message.parts,
                 annotations = message.annotations,
                 loading = loading,
+                generationActive = generationActive,
                 model = model,
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
+                onRerunTool = onRerunTool,
                 onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
             )
 
@@ -194,7 +213,7 @@ fun ChatMessage(
                 modifier = Modifier.animateContentSize()
             ) {
                 ChatMessageActionButtons(
-                    message = message,
+                    message = actionMessage,
                     onRegenerate = onRegenerate,
                     node = node,
                     onUpdate = onUpdate,
@@ -219,7 +238,7 @@ fun ChatMessage(
     }
     if (showActionsSheet) {
         ChatMessageActionsSheet(
-            message = message,
+            message = actionMessage,
             onEdit = onEdit,
             onDelete = onDelete,
             onShare = onShare,
@@ -270,8 +289,10 @@ private fun MessagePartsBlock(
     parts: List<UIMessagePart>,
     annotations: List<UIMessageAnnotation>,
     loading: Boolean,
-    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
+    generationActive: Boolean = loading,
+    onToolApproval: ((toolCallId: String, approved: Boolean, reason: String, scope: me.rerere.rikkahub.service.ChatService.ApprovalScope, toolName: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
+    onRerunTool: (suspend (toolCallId: String) -> me.rerere.rikkahub.service.ChatService.RerunToolResult)? = null,
     onUserMessageClick: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
@@ -313,16 +334,30 @@ private fun MessagePartsBlock(
     }
 
     // Render parts in original order (group thinking/tool as chain-of-thought)
-    val groupedParts = remember(parts) { parts.groupMessageParts() }
+    // Key by size + last-part identity to avoid Compose's O(N) list-comparison on every
+    // recomposition. During streaming the list grows one element at a time so size alone is
+    // sufficient to detect a meaningful change; the lastOrNull() hash catches in-place edits
+    // on the tail part (e.g. streaming text appended to the final Text part).
+    val partsKey = parts.size.toString() + (parts.lastOrNull()?.hashCode()?.toString() ?: "")
+    val groupedParts = remember(partsKey) { parts.groupMessageParts() }
     groupedParts.fastForEach { block ->
         when (block) {
             is MessagePartBlock.ThinkingBlock -> {
                 if (block.steps.isNotEmpty()) {
                     val isReasoningOnlyBlock = block.steps.fastAll { it is ThinkingStep.ReasoningStep }
+                    // Force-expand whenever any tool step is awaiting approval. Without
+                    // this, on 3+ pending tool calls only the last 2 rows are visible
+                    // and the first sits hidden behind the "show more" arrow — easy to
+                    // miss when the agent is asking for the user's go-ahead.
+                    val hasPendingApproval = block.steps.any {
+                        it is ThinkingStep.ToolStep &&
+                            it.tool.approvalState is ToolApprovalState.Pending
+                    }
                     ChainOfThought(
                         modifier = Modifier.animateContentSize(),
                         steps = block.steps,
                         collapsedAdaptiveWidth = isReasoningOnlyBlock,
+                        forceExpanded = hasPendingApproval,
                         cardColors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = settings.displaySetting.bubbleOpacity),
                         ),
@@ -344,8 +379,10 @@ private fun MessagePartsBlock(
                                     ChatMessageToolStep(
                                         tool = step.tool,
                                         loading = loading && !step.tool.isExecuted,
+                                        generationActive = generationActive,
                                         onToolApproval = onToolApproval,
                                         onToolAnswer = onToolAnswer,
+                                        onRerunTool = onRerunTool,
                                     )
                                 }
                             }
@@ -363,6 +400,14 @@ private fun MessagePartsBlock(
             is MessagePartBlock.ContentBlock -> key(block.index) {
                 when (val part = block.part) {
                     is UIMessagePart.Text -> {
+                        // A Text part may carry a `rikkahub.webview` metadata block
+                        // emitted by a JS skill. When present we render a tap-to-open
+                        // card that routes into BrowserActivity instead of the standard
+                        // markdown ("browser as the viewer"). The card returns true on
+                        // render so we skip the markdown branch. Only consider for
+                        // non-user messages: user messages don't carry this metadata.
+                        val renderedAsWebviewCard =
+                            role != MessageRole.USER && SkillWebviewCardOrNull(part)
                         val textContent = @Composable {
                             if (role == MessageRole.USER) {
                                 Surface(
@@ -419,11 +464,13 @@ private fun MessagePartsBlock(
                         // 内部可选择的 Text 会频繁注册/注销，与 Compose 选择工具栏在绘制阶段
                         // 对 selectable 列表的排序产生并发修改，导致 ConcurrentModificationException。
                         // 生成结束后内容稳定，再启用文本选择。
-                        if (loading) {
-                            textContent()
-                        } else {
-                            SelectionContainer {
+                        if (!renderedAsWebviewCard) {
+                            if (loading) {
                                 textContent()
+                            } else {
+                                SelectionContainer {
+                                    textContent()
+                                }
                             }
                         }
                     }

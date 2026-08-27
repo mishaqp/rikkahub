@@ -220,6 +220,7 @@ private fun List<UIMessage>.alignContextStart(startIndex: Int): Int {
     message = "Only use for migration. May break semantic order for messages with multiple Reasoning/Text parts.",
     level = DeprecationLevel.WARNING
 )
+@Suppress("DEPRECATION")  // when must enumerate deprecated UIMessagePart variants for exhaustiveness
 fun List<UIMessagePart>.toSortedMessageParts(): List<UIMessagePart> {
     // Skip sorting if multiple Reasoning or Text parts exist to preserve semantic order
     val reasoningCount = count { it is UIMessagePart.Reasoning }
@@ -268,7 +269,17 @@ fun UIMessage.finishPendingTools(
     transform: (UIMessagePart.Tool) -> UIMessagePart.Tool
 ): UIMessage {
     val updatedParts = parts.map { part ->
-        if (part is UIMessagePart.Tool && !part.isExecuted) {
+        // Skip tools whose approvalState is ALREADY in a terminal state (Denied, Answered)
+        // even though `!isExecuted` is true. Without this skip, a hardline-blocked tool
+        // (Denied with empty output, set by GenerationHandler at hardline-check time)
+        // gets its reason overwritten with "Generation cancelled by user" — losing the
+        // safety-floor explanation. Approved+empty stays cancellable: it represents an
+        // approval the user granted but the tool never finished executing, so `/stop`
+        // should still flip it to Denied("cancelled by user").
+        if (part is UIMessagePart.Tool && !part.isExecuted &&
+            part.approvalState !is ToolApprovalState.Denied &&
+            part.approvalState !is ToolApprovalState.Answered
+        ) {
             transform(part)
         } else {
             part
@@ -498,3 +509,25 @@ fun <T> List<T>.migrateToolNodes(
 
     return result
 }
+
+/**
+ * Legacy per-event chunk shape, kept only for [me.rerere.ai.provider.providers.google
+ * .GoogleProvider.parseStreamCandidates], which the Cloud Code Assist transport (app module)
+ * still consumes across the module boundary. New streaming code should use [StreamChunk]
+ * instead; do not build new producers or consumers of this type.
+ */
+@Serializable
+data class MessageChunk(
+    val id: String,
+    val model: String,
+    val choices: List<UIMessageChoice>,
+    val usage: TokenUsage? = null,
+)
+
+@Serializable
+data class UIMessageChoice(
+    val index: Int,
+    val delta: UIMessage?,
+    val message: UIMessage?,
+    val finishReason: String?
+)

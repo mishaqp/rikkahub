@@ -27,9 +27,39 @@ enum class MessageSearchSort(val orderBy: String) {
 
 private const val TAG = "MessageFtsManager"
 
+/**
+ * Schema for the message_fts FTS5 virtual table. Defined here so the table-init path in
+ * DataSourceModule and the Doctor's "rebuild search index" repair path use the same DDL.
+ * If the columns ever change, both the CREATE in DataSourceModule and the INSERT in
+ * [MessageFtsManager.indexConversation] need updating in lock-step.
+ */
+const val MESSAGE_FTS_CREATE_SQL = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+        text,
+        node_id UNINDEXED,
+        message_id UNINDEXED,
+        conversation_id UNINDEXED,
+        title UNINDEXED,
+        update_at UNINDEXED,
+        tokenize = 'simple'
+    )
+"""
+
 class MessageFtsManager(private val database: AppDatabase) {
 
     private val db get() = database.openHelper.writableDatabase
+
+    /**
+     * Drop and recreate the message_fts virtual table. Use this when SQLite reports
+     * a malformed inverted index (PRAGMA integrity_check) — DELETE-from-FTS5 doesn't
+     * free corrupted index pages, only DROP TABLE does. Safe because message_fts is a
+     * standalone search projection; the actual content lives in `messages` and gets
+     * reinserted by the caller (see [me.rerere.rikkahub.data.repository.ConversationRepository.rebuildAllIndexes]).
+     */
+    suspend fun dropAndRecreate() = withContext(Dispatchers.IO) {
+        db.execSQL("DROP TABLE IF EXISTS message_fts")
+        db.execSQL(MESSAGE_FTS_CREATE_SQL.trimIndent())
+    }
 
     suspend fun indexConversation(conversation: Conversation) = withContext(Dispatchers.IO) {
         val conversationId = conversation.id.toString()
@@ -56,6 +86,18 @@ class MessageFtsManager(private val database: AppDatabase) {
 
     suspend fun deleteConversation(conversationId: String) = withContext(Dispatchers.IO) {
         db.execSQL("DELETE FROM message_fts WHERE conversation_id = ?", arrayOf(conversationId))
+    }
+
+    /**
+     * Narrow update of the denormalized `title` column for a rename, without touching the
+     * indexed message rows. Use this instead of [indexConversation] when only the title
+     * changed, so a title-only rename doesn't require deleting/reinserting every message.
+     */
+    suspend fun updateConversationTitle(conversationId: String, title: String) = withContext(Dispatchers.IO) {
+        db.execSQL(
+            "UPDATE message_fts SET title = ? WHERE conversation_id = ?",
+            arrayOf(title, conversationId)
+        )
     }
 
     suspend fun deleteAll() = withContext(Dispatchers.IO) {

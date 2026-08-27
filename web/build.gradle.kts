@@ -7,9 +7,29 @@ plugins {
 val webUiDir = rootProject.layout.projectDirectory.dir("web-ui")
 val webStaticResourcesDir = layout.projectDirectory.dir("src/main/resources/static")
 
+// Install web-ui dependencies from the tracked pnpm lockfile. This task is
+// up-to-date after the first successful install on a checkout.
+// Without this step, the buildWebUi task fails on a clean checkout with
+// `react-router: command not found` until dependencies are installed.
+val installWebUiDeps = tasks.register<Exec>("installWebUiDeps") {
+    group = "build"
+    description = "Install web-ui dependencies from the lockfile."
+
+    workingDir = webUiDir.asFile
+    commandLine("pnpm", "install", "--frozen-lockfile")
+
+    inputs.files(
+        webUiDir.file("package.json"),
+        webUiDir.file("pnpm-lock.yaml")
+    )
+    outputs.dir(webUiDir.dir("node_modules"))
+}
+
 val buildWebUi = tasks.register<Exec>("buildWebUi") {
     group = "build"
     description = "Build web-ui and copy its static output into the web module resources."
+
+    dependsOn(installWebUiDeps)
 
     workingDir = webUiDir.asFile
     when {
@@ -35,10 +55,6 @@ val buildWebUi = tasks.register<Exec>("buildWebUi") {
 
 android {
     namespace = "me.rerere.rikkahub.web"
-
-    defaultConfig {
-        minSdk = 24
-    }
 }
 
 tasks.named("preBuild") {
