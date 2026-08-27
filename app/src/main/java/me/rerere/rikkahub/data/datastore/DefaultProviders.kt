@@ -76,7 +76,6 @@ val DEFAULT_PROVIDERS = listOf(
     // merge only re-copies builtIn/description/shortDescription back from defaults,
     // not enabled (same pattern as the AICore default-off comment above).
     ProviderSetting.OpenAI(
-    ProviderSetting.OpenAI(
         id = Uuid.parse("1eeea727-9ee5-4cae-93e6-6fb01a4d051e"),
         name = "OpenAI",
         baseUrl = "https://api.openai.com/v1",
