@@ -89,7 +89,13 @@ jobs:
 
           output = Path(os.environ["GITHUB_WORKSPACE"]) / "rikkahub-release.jks"
           output.write_bytes(decoded)
-          print(f"Decoded keystore: {len(decoded)} bytes")
+          magic = decoded[:8].hex()
+          container = (
+              "JKS" if decoded.startswith(bytes.fromhex("feedfeed"))
+              else "PKCS12/DER" if decoded.startswith(b"0")
+              else "unknown"
+          )
+          print(f"Decoded keystore: {len(decoded)} bytes; container={container}; magic={magic}")
           PY
           keytool -list \
             -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" \
