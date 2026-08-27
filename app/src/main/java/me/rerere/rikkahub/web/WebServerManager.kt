@@ -8,9 +8,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.files.FilesManager
@@ -51,6 +54,7 @@ class WebServerManager(
     private val filesManager: FilesManager
 ) {
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
+    private val lifecycleMutex = Mutex()
     private val nsdRegistrar = NsdServiceRegistrar(context)
 
     private val _state = MutableStateFlow(WebServerState())
@@ -63,60 +67,60 @@ class WebServerManager(
         serviceName: String = DEFAULT_SERVICE_NAME,
         localhostOnly: Boolean = false
     ) {
-        if (server != null) {
-            Log.w(TAG, "Server already running")
-            return
-        }
-
-        // Assigned synchronously (before the async body below runs) so a caller that reads
-        // state.value.startId right before calling start() gets a baseline that's guaranteed
-        // to differ from every state this attempt writes, regardless of coroutine scheduling.
-        val startId = ++nextStartId
-
         appScope.launch {
-            // 仅本机模式绑定回环地址
-            val host = if (localhostOnly) HOST_LOOPBACK else HOST_ALL_INTERFACES
-            val baseState = WebServerState(
-                port = port,
-                serviceName = serviceName,
-                localhostOnly = localhostOnly,
-                startId = startId
-            )
-            try {
-                _state.value = _state.value.copy(isLoading = true, startId = startId)
-                Log.i(TAG, "Starting web server on $host:$port")
-                if (!isPortAvailable(port)) {
-                    Log.w(TAG, "Port $port is already in use")
-                    _state.value = baseState.copy(error = "Port $port is already in use")
-                    return@launch
+            lifecycleMutex.withLock {
+                if (server != null || _state.value.isLoading) {
+                    Log.w(TAG, "Server start already in progress or running")
+                    return@withLock
                 }
-                server = startWebServer(port = port, host = host) {
-                    configureWebApi(context, chatService, conversationRepo, folderRepo, settingsStore, filesManager)
-                }.start(wait = false)
 
-                _state.value = baseState.copy(isRunning = true)
-                // 仅局域网模式注册 mDNS
-                if (!localhostOnly) {
-                    runCatching {
-                        nsdRegistrar.register(
-                            port = port,
-                            serviceName = serviceName,
-                            onRegistered = { info ->
-                                _state.value = _state.value.copy(
-                                    serviceName = info.serviceName,
-                                    hostname = info.hostname,
-                                    address = info.address.hostAddress
-                                )
-                            }
-                        )
-                    }.onFailure {
-                        Log.w(TAG, "NSD register failed", it)
+                // Allocate the attempt id inside the lifecycle lock. Previously two callers
+                // could both pass server == null before either asynchronous start assigned
+                // the server field, causing two CIO engines to race for the same port.
+                val startId = ++nextStartId
+                val host = if (localhostOnly) HOST_LOOPBACK else HOST_ALL_INTERFACES
+                val baseState = WebServerState(
+                    port = port,
+                    serviceName = serviceName,
+                    localhostOnly = localhostOnly,
+                    startId = startId
+                )
+                try {
+                    _state.value = baseState.copy(isLoading = true)
+                    Log.i(TAG, "Starting web server on $host:$port")
+                    if (!isPortAvailable(port)) {
+                        Log.w(TAG, "Port $port is already in use")
+                        _state.value = baseState.copy(error = "Port $port is already in use")
+                        return@withLock
                     }
+                    server = startWebServer(port = port, host = host) {
+                        configureWebApi(context, chatService, conversationRepo, folderRepo, settingsStore, filesManager)
+                    }.start(wait = false)
+
+                    _state.value = baseState.copy(isRunning = true)
+                    if (!localhostOnly) {
+                        runCatching {
+                            nsdRegistrar.register(
+                                port = port,
+                                serviceName = serviceName,
+                                onRegistered = { info ->
+                                    _state.value = _state.value.copy(
+                                        serviceName = info.serviceName,
+                                        hostname = info.hostname,
+                                        address = info.address.hostAddress
+                                    )
+                                }
+                            )
+                        }.onFailure {
+                            Log.w(TAG, "NSD register failed", it)
+                        }
+                    }
+                    Log.i(TAG, "Web server started successfully on $host:$port")
+                } catch (e: Exception) {
+                    server = null
+                    Log.e(TAG, "Failed to start web server", e)
+                    _state.value = baseState.copy(error = e.message ?: e.javaClass.simpleName)
                 }
-                Log.i(TAG, "Web server started successfully on $host:$port")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start web server", e)
-                _state.value = baseState.copy(error = e.message)
             }
         }
     }
@@ -129,20 +133,22 @@ class WebServerManager(
         _state.value =
             _state.value.copy(isRunning = false, isLoading = true, hostname = null, address = null, error = null)
         appScope.launch {
-            try {
-                Log.i(TAG, "Stopping web server")
-                server?.stop(1000, 2000)
-                server = null
-                runCatching {
-                    nsdRegistrar.unregister()
-                }.onFailure {
-                    Log.w(TAG, "NSD unregister failed", it)
+            lifecycleMutex.withLock {
+                try {
+                    Log.i(TAG, "Stopping web server")
+                    server?.stop(1000, 2000)
+                    server = null
+                    runCatching {
+                        nsdRegistrar.unregister()
+                    }.onFailure {
+                        Log.w(TAG, "NSD unregister failed", it)
+                    }
+                    _state.value = _state.value.copy(isLoading = false)
+                    Log.i(TAG, "Web server stopped")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to stop web server", e)
+                    _state.value = _state.value.copy(isLoading = false, error = e.message)
                 }
-                _state.value = _state.value.copy(isLoading = false)
-                Log.i(TAG, "Web server stopped")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to stop web server", e)
-                _state.value = _state.value.copy(isLoading = false, error = e.message)
             }
         }
     }
@@ -153,7 +159,10 @@ class WebServerManager(
         localhostOnly: Boolean = _state.value.localhostOnly
     ) {
         stop()
-        start(port, serviceName, localhostOnly)
+        appScope.launch {
+            state.first { !it.isLoading && !it.isRunning }
+            start(port, serviceName, localhostOnly)
+        }
     }
 
     private fun isPortAvailable(port: Int): Boolean {
