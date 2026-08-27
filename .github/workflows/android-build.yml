@@ -135,11 +135,13 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
+          apksigner="$ANDROID_HOME/build-tools/37.0.0/apksigner"
+          test -x "$apksigner"
           apks=(app/build/outputs/apk/release/*.apk)
           test "${#apks[@]}" -gt 0
           for apk in "${apks[@]}"; do
             unzip -t "$apk" >/dev/null
-            apksigner verify --verbose --print-certs "$apk"
+            "$apksigner" verify --verbose --print-certs "$apk"
           done
           sha256sum "${apks[@]}" > app/build/outputs/apk/release/SHA256SUMS.txt
 
