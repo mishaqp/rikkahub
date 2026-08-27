@@ -175,10 +175,10 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.4.13-agent-full
+          tag_name: v2.4.14-agent-full
           target_commitish: ${{ github.sha }}
-          name: RikkaHub 2.4.13 Agent Full
-          body: RikkaHub 2.4.13 with full agent features from ExTV
+          name: RikkaHub 2.4.14 Agent Full
+          body: RikkaHub 2.4.14 with full agent features from ExTV
           files: |
             release/*.apk
             release/SHA256SUMS.txt
@@ -191,7 +191,7 @@ jobs:
             await github.rest.git.updateRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: 'tags/v2.4.13-agent-full',
+              ref: 'tags/v2.4.14-agent-full',
               sha: context.sha,
               force: true,
             })
