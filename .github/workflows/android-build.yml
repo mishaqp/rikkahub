@@ -59,6 +59,8 @@ jobs:
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
+          set -o pipefail
+          {
           python3 - <<'PY'
           import base64
           import os
@@ -93,6 +95,16 @@ jobs:
             -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" \
             -storepass "$STORE_PASSWORD" \
             -alias "$KEY_ALIAS"
+          } 2>&1 | tee keystore-diagnostic.txt
+
+      - name: Upload keystore diagnostic on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keystore-diagnostic
+          path: keystore-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
