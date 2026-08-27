@@ -11,6 +11,7 @@ import me.rerere.rikkahub.data.repository.FilesRepository
 import me.rerere.rikkahub.data.repository.GenMediaRepository
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.data.repository.WorkspaceRepository
+import me.rerere.rikkahub.ui.pages.extensions.workspace.WorkspaceTerminalSessionManager
 import me.rerere.workspace.ProotShellRunner
 import me.rerere.workspace.RootfsInstaller
 import me.rerere.workspace.WorkspaceBindMount
@@ -74,6 +75,13 @@ val repositoryModule = module {
 
     single {
         WorkspaceRepository(get(), get(), get(), get())
+    }
+
+    single {
+        WorkspaceTerminalSessionManager(
+            context = get(),
+            appScope = get(),
+        )
     }
 
     single {
