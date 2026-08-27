@@ -53,6 +53,47 @@ jobs:
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Decode and verify release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import re
+          from pathlib import Path
+
+          value = os.environ.get("KEYSTORE_BASE64", "").strip()
+          if not value:
+              raise SystemExit("KEYSTORE_BASE64 is empty or unavailable")
+
+          value = value.strip("'\"")
+          if ";base64," in value:
+              value = value.split(";base64,", 1)[1]
+          if value.startswith("KEYSTORE_BASE64="):
+              value = value.split("=", 1)[1]
+          value = re.sub(r"\\s+", "", value)
+          value += "=" * (-len(value) % 4)
+
+          try:
+              decoded = base64.b64decode(value, altchars=b"-_", validate=True)
+          except Exception as exc:
+              raise SystemExit(f"KEYSTORE_BASE64 is not valid Base64: {exc}") from exc
+
+          if len(decoded) < 128:
+              raise SystemExit("Decoded keystore is unexpectedly small; replace KEYSTORE_BASE64")
+
+          output = Path(os.environ["GITHUB_WORKSPACE"]) / "rikkahub-release.jks"
+          output.write_bytes(decoded)
+          print(f"Decoded keystore: {len(decoded)} bytes")
+          PY
+          keytool -list \
+            -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" \
+            -storepass "$STORE_PASSWORD" \
+            -alias "$KEY_ALIAS"
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
@@ -63,19 +104,6 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      - name: Decode and verify release keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-        run: |
-          test -n "$KEYSTORE_BASE64"
-          printf '%s' "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "$GITHUB_WORKSPACE/rikkahub-release.jks"
-          test -s "$GITHUB_WORKSPACE/rikkahub-release.jks"
-          keytool -list \
-            -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" \
-            -storepass "$STORE_PASSWORD" \
-            -alias "$KEY_ALIAS"
 
       - name: Build signed release APK
         env:
