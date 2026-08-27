@@ -63,23 +63,19 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      - name: Generate debug keystore for release signing
+      - name: Decode and verify release keystore
         env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # Generate a debug keystore for release signing
-          keytool -genkey -v \
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > "$GITHUB_WORKSPACE/rikkahub-release.jks"
+          test -s "$GITHUB_WORKSPACE/rikkahub-release.jks"
+          keytool -list \
             -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -alias "$KEY_ALIAS" \
             -storepass "$STORE_PASSWORD" \
-            -keypass "$KEY_PASSWORD" \
-            -dname "CN=RikkaHub Agent, OU=Personal, O=RikkaHub Agent, L=Local, ST=Local, C=FR"
-          
-          # Verify keystore
-          keytool -list -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" -storepass "$STORE_PASSWORD" -storetype JKS
+            -alias "$KEY_ALIAS"
 
       - name: Build signed release APK
         env:
@@ -89,11 +85,25 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
+      - name: Verify release APKs and generate checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          test "${#apks[@]}" -gt 0
+          for apk in "${apks[@]}"; do
+            unzip -t "$apk" >/dev/null
+            apksigner verify --verbose --print-certs "$apk"
+          done
+          sha256sum "${apks[@]}" > app/build/outputs/apk/release/SHA256SUMS.txt
+
       - name: Upload signed release APK
         uses: actions/upload-artifact@v4
         with:
           name: rikkahub-agent-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Remove release keystore
@@ -121,7 +131,9 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: RikkaHub 2.4.13 Agent Full
           body: RikkaHub 2.4.13 with full agent features from ExTV
-          files: release/*.apk
+          files: |
+            release/*.apk
+            release/SHA256SUMS.txt
           overwrite_files: true
 
       - name: Point release tag at the built commit
