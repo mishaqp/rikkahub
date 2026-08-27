@@ -33,10 +33,11 @@ jobs:
         run: |
           sdkmanager --install \
             "platform-tools" \
-            "platforms;android-37" \
-            "build-tools;37.0.0" \
             "cmake;3.22.1" \
             "ndk;29.0.14206865"
+          # API 37 is currently published through Google's preview channel on the hosted
+          # runner; stable-channel lookup reports it as missing.
+          sdkmanager --channel=3 --install "platforms;android-37"
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
