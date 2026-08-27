@@ -278,6 +278,7 @@ val dataSourceModule = module {
                 }
             }
             .build().also { SearchService.init(it, get()) }
+        client
     }
 
     single<OkHttpClient>(named("codex")) {

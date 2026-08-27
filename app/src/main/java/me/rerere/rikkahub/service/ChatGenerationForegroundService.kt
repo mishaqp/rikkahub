@@ -124,7 +124,7 @@ class ChatGenerationForegroundService : Service() {
 
     companion object {
         private const val ACTION_RECONCILE = "me.rerere.rikkahub.action.RECONCILE_CHAT_GENERATION_FGS"
-        private const val NOTIFICATION_ID = 2002
+        internal const val NOTIFICATION_ID = 2002
         private const val STARTUP_TIMEOUT_MS = 5_000L
         private val shouldRun = AtomicBoolean(false)
         private val readiness = ForegroundServiceReadiness()

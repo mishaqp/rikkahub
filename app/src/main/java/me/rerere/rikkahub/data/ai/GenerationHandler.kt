@@ -67,8 +67,6 @@ import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.AssistantMemory
 import me.rerere.rikkahub.data.repository.MemoryRepository
 import me.rerere.rikkahub.utils.applyPlaceholders
-import java.io.File
-import java.io.IOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
@@ -1312,7 +1310,6 @@ class GenerationHandler(
             messages = messages.handleTextGenerationResult(result = result, model = model)
             onUpdateMessages(messages)
         }
-        return context.getString(messageRes)
     }
 
     private fun maybeTruncateToolOutput(

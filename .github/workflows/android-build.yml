@@ -62,3 +62,25 @@ jobs:
           name: rikkahub-agent-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+  release:
+    needs: build-debug-apk
+    if: github.ref == 'refs/heads/feature/full-agent-port'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: rikkahub-agent-debug-apk
+          path: release
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.4.13-agent-full
+          name: RikkaHub 2.4.13 Agent Full
+          body: RikkaHub 2.4.13 with full agent features from ExTV
+          files: release/*.apk

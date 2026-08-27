@@ -107,7 +107,6 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.ConversationCompaction
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.AssistantAffectScope
-import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.data.model.toMessageNode
 import me.rerere.rikkahub.data.repository.ConversationRepository
@@ -560,30 +559,6 @@ class ChatService(
                     s.generationJob.map { job -> s.id to job }
                 }) { pairs ->
                     pairs.filter { it.second != null }.toMap()
-                }
-            }
-        }
-    }
-
-    private fun launchGenerationJob(
-        conversationId: Uuid,
-        keepAliveInBackground: Boolean = true,
-        block: suspend () -> Unit,
-    ): Job {
-        if (!keepAliveInBackground) return appScope.launch { block() }
-
-        val generationId = Uuid.random()
-        val foregroundStarted = ChatGenerationForegroundService.acquire(
-            context = context,
-            generationId = generationId,
-            conversationId = conversationId,
-        )
-        return appScope.launch {
-            try {
-                block()
-            } finally {
-                if (foregroundStarted) {
-                    ChatGenerationForegroundService.release(context, generationId)
                 }
             }
         }
