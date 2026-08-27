@@ -107,7 +107,20 @@ jobs:
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew testReleaseUnitTest lintRelease assembleRelease --no-daemon --stacktrace
+        shell: bash
+        run: |
+          set -euo pipefail
+          tasks="$(./gradlew :app:tasks --all --console=plain)"
+          test_task="$(printf '%s\n' "$tasks" | sed -nE '/^test[^ ]*[Rr]elease[^ ]* - / { s/^(test[^ ]*) - .*/\1/p; q; }')"
+          if test -z "$test_task"; then
+            test_task="$(printf '%s\n' "$tasks" | sed -nE '/^test - / { s/^(test) - .*/\1/p; q; }')"
+          fi
+          if test -z "$test_task"; then
+            echo 'No app unit-test task is available' >&2
+            exit 1
+          fi
+          echo "Using unit-test task: :app:$test_task"
+          ./gradlew ":app:$test_task" lintRelease assembleRelease --no-daemon --stacktrace
 
       - name: Verify APK signatures and checksums
         shell: bash
