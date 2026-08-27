@@ -64,30 +64,34 @@ android {
 
             if (localPropertiesFile.exists()) {
                 localProperties.load(FileInputStream(localPropertiesFile))
+            }
 
-                val storeFilePath = localProperties.getProperty("storeFile")
-                val storePasswordValue = localProperties.getProperty("storePassword")
-                val keyAliasValue = localProperties.getProperty("keyAlias")
-                val keyPasswordValue = localProperties.getProperty("keyPassword")
+            // CI provides these values through GitHub Secrets. Local development keeps the
+            // existing local.properties fallback, without putting any signing material in Git.
+            val storeFilePath = providers.environmentVariable("STORE_FILE").orNull
+                ?: localProperties.getProperty("storeFile")
+            val storePasswordValue = providers.environmentVariable("STORE_PASSWORD").orNull
+                ?: localProperties.getProperty("storePassword")
+            val keyAliasValue = providers.environmentVariable("KEY_ALIAS").orNull
+                ?: localProperties.getProperty("keyAlias")
+            val keyPasswordValue = providers.environmentVariable("KEY_PASSWORD").orNull
+                ?: localProperties.getProperty("keyPassword")
 
-                if (storeFilePath != null && storePasswordValue != null &&
-                    keyAliasValue != null && keyPasswordValue != null
-                ) {
-                    storeFile = file(storeFilePath)
-                    storePassword = storePasswordValue
-                    keyAlias = keyAliasValue
-                    keyPassword = keyPasswordValue
-                } else {
-                    val missing = buildList {
-                        if (storeFilePath == null) add("storeFile")
-                        if (storePasswordValue == null) add("storePassword")
-                        if (keyAliasValue == null) add("keyAlias")
-                        if (keyPasswordValue == null) add("keyPassword")
-                    }
-                    logger.warn("Signing config: local.properties is missing $missing, release build will be unsigned")
-                }
+            if (storeFilePath != null && storePasswordValue != null &&
+                keyAliasValue != null && keyPasswordValue != null
+            ) {
+                storeFile = file(storeFilePath)
+                storePassword = storePasswordValue
+                keyAlias = keyAliasValue
+                keyPassword = keyPasswordValue
             } else {
-                logger.warn("Signing config: local.properties not found, release build will be unsigned")
+                val missing = buildList {
+                    if (storeFilePath == null) add("STORE_FILE/storeFile")
+                    if (storePasswordValue == null) add("STORE_PASSWORD/storePassword")
+                    if (keyAliasValue == null) add("KEY_ALIAS/keyAlias")
+                    if (keyPasswordValue == null) add("KEY_PASSWORD/keyPassword")
+                }
+                logger.warn("Signing config is missing $missing; release build will be unsigned")
             }
         }
     }
