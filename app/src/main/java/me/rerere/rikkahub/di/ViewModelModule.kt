@@ -79,7 +79,12 @@ val viewModelModule = module {
         )
     }
     viewModelOf(::SkillDetailVM)
-    viewModelOf(::WorkspaceVM)
+    viewModel<WorkspaceVM> {
+        WorkspaceVM(
+            repository = get(),
+            terminalSessionManager = get(),
+        )
+    }
     viewModel<WorkspaceDetailVM> {
         WorkspaceDetailVM(
             id = it.get(),
