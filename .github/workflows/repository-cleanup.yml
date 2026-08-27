@@ -1,0 +1,89 @@
+name: One-time repository cleanup
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/repository-cleanup.yml
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      KEEP_RELEASE_TAG: v2.4.14-agent-full
+      KEEP_RUN_ID: "33107346589"
+
+    steps:
+      - name: Remove obsolete branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          branches=(
+            "feat/context-limit"
+            "feature/full-agent-port"
+            "feature/local-llm-integration"
+            "refactor/ai-stream"
+            "refactor/chat-service"
+            "sync/upstream-2.4.14"
+          )
+          for branch in "${branches[@]}"; do
+            gh api --method DELETE "repos/$REPOSITORY/git/refs/heads/$branch" 2>/dev/null || true
+          done
+
+      - name: Remove obsolete releases and tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPOSITORY/releases?per_page=100"             --jq '.[] | [.id, .tag_name] | @tsv' |
+          while IFS=$'\t' read -r release_id tag_name; do
+            if [[ "$tag_name" != "$KEEP_RELEASE_TAG" ]]; then
+              gh api --method DELETE "repos/$REPOSITORY/releases/$release_id"
+            fi
+          done
+
+          gh api --paginate "repos/$REPOSITORY/git/matching-refs/tags/"             --jq '.[].ref' |
+          while read -r ref; do
+            tag="${ref#refs/tags/}"
+            if [[ "$tag" != "$KEEP_RELEASE_TAG" ]]; then
+              gh api --method DELETE "repos/$REPOSITORY/git/refs/tags/$tag"
+            fi
+          done
+
+      - name: Remove artifacts from old runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$REPOSITORY/actions/artifacts?per_page=100"             --jq '.artifacts[] | [.id, (.workflow_run.id // 0)] | @tsv' |
+          while IFS=$'\t' read -r artifact_id run_id; do
+            if [[ "$run_id" != "$KEEP_RUN_ID" ]]; then
+              gh api --method DELETE "repos/$REPOSITORY/actions/artifacts/$artifact_id"
+            fi
+          done
+
+      - name: Remove old workflow runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_run="${GITHUB_RUN_ID}"
+          gh api --paginate "repos/$REPOSITORY/actions/runs?per_page=100"             --jq '.workflow_runs[].id' |
+          while read -r run_id; do
+            if [[ "$run_id" != "$KEEP_RUN_ID" && "$run_id" != "$current_run" ]]; then
+              gh api --method DELETE "repos/$REPOSITORY/actions/runs/$run_id" 2>/dev/null || true
+            fi
+          done
+
+      - name: Remove this temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          path=".github/workflows/repository-cleanup.yml"
+          file_sha=$(gh api "repos/$REPOSITORY/contents/$path?ref=master" --jq '.sha')
+          gh api --method DELETE "repos/$REPOSITORY/contents/$path"             -f message="chore: remove temporary repository cleanup workflow"             -f sha="$file_sha"             -f branch="master"
