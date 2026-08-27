@@ -19,6 +19,7 @@ import me.rerere.rikkahub.data.ai.AIRequestInterceptor
 import me.rerere.rikkahub.data.ai.RequestLoggingInterceptor
 import me.rerere.rikkahub.data.ai.transformers.AssistantTemplateLoader
 import me.rerere.rikkahub.data.ai.GenerationHandler
+import me.rerere.rikkahub.data.ai.TranslationHandler
 import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
 import me.rerere.rikkahub.data.api.HuggingFaceAPI
 import me.rerere.rikkahub.data.api.RikkaHubAPI
@@ -199,6 +200,10 @@ val dataSourceModule = module {
     }
 
     single { me.rerere.rikkahub.data.ai.SystemPromptBuilder() }
+
+    single {
+        TranslationHandler(providerManager = get())
+    }
 
     single<OkHttpClient> {
         val settingsStore: SettingsStore = get()

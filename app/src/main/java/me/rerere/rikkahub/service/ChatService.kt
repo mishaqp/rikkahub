@@ -72,6 +72,7 @@ import me.rerere.rikkahub.data.ai.ContextCompactionPlanner
 import me.rerere.rikkahub.data.ai.ContextCompactionPresentation
 import me.rerere.rikkahub.data.ai.CompactedMessageView
 import me.rerere.rikkahub.data.ai.ContextCompactionView
+import me.rerere.rikkahub.data.ai.TranslationHandler
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
@@ -295,6 +296,7 @@ class ChatService(
     private val conversationRepo: ConversationRepository,
     private val memoryRepository: MemoryRepository,
     private val generationHandler: GenerationHandler,
+    private val translationHandler: TranslationHandler,
     private val templateTransformer: TemplateTransformer,
     private val providerManager: ProviderManager,
     private val localTools: LocalTools,
@@ -2843,7 +2845,7 @@ class ChatService(
                 val loadingText = context.getString(R.string.translating)
                 updateTranslationField(conversationId, message.id, loadingText)
 
-                generationHandler.translateText(
+                translationHandler.translateText(
                     settings = settings,
                     sourceText = messageText,
                     targetLanguage = targetLanguage
