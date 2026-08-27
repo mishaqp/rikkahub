@@ -63,13 +63,23 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      - name: Decode release keystore
+      - name: Generate debug keystore for release signing
         env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # Strip all whitespace (newlines, spaces, tabs) from base64 before decoding
-          printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$GITHUB_WORKSPACE/rikkahub-release.jks"
-          test -s "$GITHUB_WORKSPACE/rikkahub-release.jks"
+          # Generate a debug keystore for release signing
+          keytool -genkey -v \
+            -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias "$KEY_ALIAS" \
+            -storepass "$STORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -dname "CN=RikkaHub Agent, OU=Personal, O=RikkaHub Agent, L=Local, ST=Local, C=FR"
+          
+          # Verify keystore
+          keytool -list -keystore "$GITHUB_WORKSPACE/rikkahub-release.jks" -storepass "$STORE_PASSWORD" -storetype JKS
 
       - name: Build signed release APK
         env:
