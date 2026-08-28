@@ -351,7 +351,7 @@ class PromptInjectionTransformerTest {
         )
 
         assertEquals(2, result.size)
-        assertTrue(result[0].isSynthetic)
+        assertFalse(result[0].isSynthetic)
         val systemText = getMessageText(result[0])
         assertTrue(systemText.startsWith("Original system prompt"))
         assertTrue(systemText.endsWith("Appended content"))
