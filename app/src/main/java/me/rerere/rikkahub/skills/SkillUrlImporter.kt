@@ -198,6 +198,13 @@ class SkillUrlImporter(
                 setOf("when to use", "steps", "tools used")
         }
 
+    /** Quote a scalar for YAML double-quoted form so colons and newlines stay valid. */
+    private fun yamlQuote(value: String): String =
+        value.replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\r", " ")
+            .replace("\n", " ")
+
     private fun transcodeFromOpenclaw(raw: String, sourceUrl: String, override: String?): String? {
         // Pull the first H1 as name (if missing, fall back to first non-blank line).
         val h1Match = Regex("""^#\s+(.+)$""", RegexOption.MULTILINE).find(raw)
@@ -221,7 +228,7 @@ class SkillUrlImporter(
         val frontmatterBlock = buildString {
             appendLine("---")
             appendLine("name: $sanitisedName")
-            appendLine("description: ${descCandidate.replace("\n", " ").replace("\"", "")}")
+            appendLine("description: \"${yamlQuote(descCandidate)}\"")
             appendLine("source-format: openclaw")
             appendLine("source-url: $sourceUrl")
             appendLine("---")
@@ -250,7 +257,7 @@ class SkillUrlImporter(
         val body = buildString {
             appendLine("---")
             appendLine("name: $sanitisedName")
-            appendLine("description: ${description.replace("\n", " ").replace("\"", "")}")
+            appendLine("description: \"${yamlQuote(description)}\"")
             appendLine("source-format: hermes")
             appendLine("source-url: $sourceUrl")
             appendLine("---")
