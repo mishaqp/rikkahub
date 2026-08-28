@@ -29,6 +29,8 @@ data class LiteRtModelConfig(
     val supportsAudio: Boolean = false,
     val supportsThinking: Boolean = false,
     val supportsSpeculativeDecoding: Boolean = false,
+    /** LiteRT-LM 0.16 variable-resolution visual budget; currently Gemma 4 only. */
+    val supportsVisualTokenBudget: Boolean = false,
     val minDeviceMemoryGb: Int = 6,
     val sizeBytes: Long,
 )
@@ -89,6 +91,7 @@ object LiteRtModelDefaults {
             supportsAudio = true,
             supportsThinking = true,
             supportsSpeculativeDecoding = true,
+            supportsVisualTokenBudget = true,
             minDeviceMemoryGb = 8,
             sizeBytes = 2_588_147_712L,
         ),
@@ -106,6 +109,7 @@ object LiteRtModelDefaults {
             supportsAudio = true,
             supportsThinking = true,
             supportsSpeculativeDecoding = true,
+            supportsVisualTokenBudget = true,
             minDeviceMemoryGb = 12,
             sizeBytes = 3_659_530_240L,
         ),
@@ -124,6 +128,7 @@ object LiteRtModelDefaults {
             supportsAudio = true,
             supportsThinking = true,
             supportsSpeculativeDecoding = true,
+            supportsVisualTokenBudget = true,
             minDeviceMemoryGb = 16,
             sizeBytes = 6_548_000_000L,
         ),
