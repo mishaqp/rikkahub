@@ -2,6 +2,7 @@ package me.rerere.rikkahub.data.ai.tools.local
 
 import android.Manifest
 import android.content.Context
+import androidx.annotation.SuppressLint
 import android.location.Location
 import android.location.LocationManager
 import android.util.Log
@@ -42,6 +43,7 @@ private fun JsonObjectBuilder.putLocation(loc: Location, providerName: String) {
     put("timestamp_ms", loc.time)
 }
 
+@SuppressLint("MissingPermission")
 fun locationTool(context: Context): Tool = Tool(
     name = "get_location",
     description = """
@@ -86,8 +88,11 @@ fun locationTool(context: Context): Tool = Tool(
 
             !PermissionHelper.hasRuntime(
                 context,
-                listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-            ) -> errorPayload("permission ACCESS_FINE_LOCATION not granted")
+                listOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                )
+            ) -> errorPayload("location permission not granted")
 
             else -> {
                 val lm = context.getSystemService(LocationManager::class.java)
