@@ -179,7 +179,7 @@ class SkillUrlImporter(
         // to default *all* unrecognized markdown to OPENCLAW, which ran the tool-name
         // transcoder over it and silently mutated native skills that simply lacked
         // frontmatter. Require a positive signal before transcoding.
-        if (OpenclawMarker.containsMatchIn(trimmed)) return SkillFormat.OPENCLAW
+        if (hasOpenclawMarker(trimmed)) return SkillFormat.OPENCLAW
         // Unclassifiable markdown — store verbatim as NATIVE. If it has no parseable
         // `name:` the import surfaces an honest `missing_name` error instead of inventing
         // one from prose and rewriting the body.
@@ -187,9 +187,16 @@ class SkillUrlImporter(
     }
 
     // openclaw section markers: the `## When to use` / `## Steps` / `## Tools used` headings
-    // that distinguish an openclaw skill from arbitrary markdown.
-    private val OpenclawMarker =
-        Regex("""(?im)^#{1,6}[ \t]+(when to use|steps|tools used)[ \t]*$""")
+    // that distinguish an openclaw skill from arbitrary markdown. Parse line-by-line so
+    // whitespace in one heading cannot consume the following markdown line.
+    private fun hasOpenclawMarker(raw: String): Boolean =
+        raw.lineSequence().any { line ->
+            val heading = line.trim()
+            val hashCount = heading.takeWhile { it == '#' }.length
+            hashCount in 1..6 &&
+                heading.drop(hashCount).trim().lowercase() in
+                setOf("when to use", "steps", "tools used")
+        }
 
     private fun transcodeFromOpenclaw(raw: String, sourceUrl: String, override: String?): String? {
         // Pull the first H1 as name (if missing, fall back to first non-blank line).
