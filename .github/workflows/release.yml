@@ -101,7 +101,7 @@ jobs:
             -storepass "$STORE_PASSWORD" \
             -alias "$KEY_ALIAS" >/dev/null
 
-      - name: Run release tests, lint and build
+      - name: Run release unit tests
         env:
           STORE_FILE: ${{ runner.temp }}/rikkahub-release.jks
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -120,7 +120,35 @@ jobs:
             exit 1
           fi
           echo "Using unit-test task: :app:$test_task"
-          ./gradlew ":app:$test_task" lintRelease assembleRelease --no-daemon --stacktrace
+          ./gradlew ":app:$test_task" --no-daemon --stacktrace
+
+      - name: Run release lint serially
+        env:
+          STORE_FILE: ${{ runner.temp }}/rikkahub-release.jks
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 35m \
+            ./gradlew lintRelease \
+              --no-daemon \
+              --no-parallel \
+              --no-configuration-cache \
+              --max-workers=1 \
+              --stacktrace
+
+      - name: Assemble signed release APK
+        env:
+          STORE_FILE: ${{ runner.temp }}/rikkahub-release.jks
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Verify APK signatures and checksums
         shell: bash
