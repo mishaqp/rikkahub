@@ -153,11 +153,13 @@ android {
         // correctness/security findings (for example MissingPermission and NewApi) remain
         // blocking and are fixed in source.
         disable.addAll(
-            "FullBackupContent",
-            "MissingTranslation",
-            "LocalContextGetResourceValueCall",
-            "NonObservableLocale",
-            "ContextCastToActivity",
+            listOf(
+                "FullBackupContent",
+                "MissingTranslation",
+                "LocalContextGetResourceValueCall",
+                "NonObservableLocale",
+                "ContextCastToActivity",
+            )
         )
     }
     tasks.withType<KotlinCompile>().configureEach {
