@@ -17,11 +17,7 @@ import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
-import com.google.ai.edge.litertlm.NoRepeatNgramConfig
-import com.google.ai.edge.litertlm.RepetitionPenaltyConfig
-import com.google.ai.edge.litertlm.ResponseFormat
 import com.google.ai.edge.litertlm.SamplerConfig
-import com.google.ai.edge.litertlm.ThinkingConfig
 import com.google.ai.edge.litertlm.ToolProvider
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -87,9 +83,6 @@ sealed interface StreamEvent {
     /** The **cumulative** response so far, not a delta, same contract the SDK's
      *  `MessageCallback` uses. Downstream computes deltas itself. */
     data class Delta(val cumulative: String) : StreamEvent
-
-    /** Cumulative reasoning-channel text. The provider converts it to reasoning deltas. */
-    data class Thinking(val cumulative: String) : StreamEvent
 
     /** Tool calls the model emitted this turn, in the order the model produced them. */
     data class ToolCalls(val calls: List<RuntimeToolCall>) : StreamEvent
@@ -241,9 +234,11 @@ class LiteRtRuntime(private val context: Context) {
         private set
 
     /**
-     * Per-stream timing + token counts. LiteRT-LM 0.16's native benchmark counters are the
-     * primary source; the old character estimate remains as a fallback for devices where the
-     * optional benchmark query fails.
+     * Per-stream timing + token counts. `prefillTps` = input tokens / time from
+     * `sendMessageAsync` to first `onMessage`; `decodeTps` = output tokens / time from
+     * first onMessage to onDone. Token counts are character-based estimates (cumulative
+     * String.length divided by ~4 chars/token) because the SDK does not surface a per-call
+     * tokenizer counter — accurate within ~10% for English text, less for CJK.
      */
     data class StreamTelemetry(
         val prefillMs: Long,
@@ -251,36 +246,16 @@ class LiteRtRuntime(private val context: Context) {
         val inputCharCount: Int,
         val outputCharCount: Int,
         val specDecodingEngaged: Boolean,
-        val nativePrefillTokenCount: Int? = null,
-        val nativeDecodeTokenCount: Int? = null,
-        val nativePrefillTps: Double? = null,
-        val nativeDecodeTps: Double? = null,
     ) {
-        val hasNativeBenchmark: Boolean =
-            nativePrefillTokenCount != null || nativeDecodeTokenCount != null
-
-        val inputTokenCount: Int =
-            nativePrefillTokenCount ?: (inputCharCount / CHARS_PER_TOKEN)
-
-        val outputTokenCount: Int =
-            nativeDecodeTokenCount ?: (outputCharCount / CHARS_PER_TOKEN)
-
-        val prefillTps: Double = nativePrefillTps?.takeIf { it.isFinite() && it >= 0.0 }
-            ?: if (prefillMs > 0) {
-                (inputCharCount.toDouble() / CHARS_PER_TOKEN) * 1000.0 / prefillMs
-            } else {
-                0.0
-            }
-
-        val decodeTps: Double = nativeDecodeTps?.takeIf { it.isFinite() && it >= 0.0 }
-            ?: if (decodeMs > 0) {
-                (outputCharCount.toDouble() / CHARS_PER_TOKEN) * 1000.0 / decodeMs
-            } else {
-                0.0
-            }
+        val prefillTps: Double = if (prefillMs > 0)
+            (inputCharCount.toDouble() / CHARS_PER_TOKEN) * 1000.0 / prefillMs else 0.0
+        val decodeTps: Double = if (decodeMs > 0)
+            (outputCharCount.toDouble() / CHARS_PER_TOKEN) * 1000.0 / decodeMs else 0.0
 
         companion object {
-            /** Conservative fallback used only when native benchmark data is unavailable. */
+            /** Conservative estimate. Underestimates speed for English (true rate ~3.5
+             *  chars/token) and overestimates for CJK (~1.5 chars/token), but consistent
+             *  enough for relative speed comparisons across runs on the same model. */
             const val CHARS_PER_TOKEN: Int = 4
         }
     }
@@ -344,7 +319,6 @@ class LiteRtRuntime(private val context: Context) {
         val modelPath: String,
         val accelerator: String,
         val maxNumTokens: Int,
-        val maxNumImages: Int,
         val supportImage: Boolean,
         val supportAudio: Boolean,
         val speculativeDecoding: Boolean,
@@ -362,7 +336,6 @@ class LiteRtRuntime(private val context: Context) {
     private data class ConversationKey(
         val systemInstructionText: String?,
         val constrainedDecoding: Boolean,
-        val enableResponseFormat: Boolean,
         val topK: Int,
         val topP: Double,
         val temperature: Double,
@@ -374,7 +347,6 @@ class LiteRtRuntime(private val context: Context) {
         val systemInstruction: Contents?,
         val tools: List<ToolProvider>,
         val constrainedDecoding: Boolean,
-        val enableResponseFormat: Boolean,
         val topK: Int,
         val topP: Double,
         val temperature: Double,
@@ -460,7 +432,6 @@ class LiteRtRuntime(private val context: Context) {
         preferredAccel: String? = null,
         forceCpu: Boolean = false,
         maxNumTokens: Int = 4096,
-        maxNumImages: Int = 1,
         supportImage: Boolean = false,
         supportAudio: Boolean = false,
         speculativeDecoding: Boolean = false,
@@ -470,7 +441,6 @@ class LiteRtRuntime(private val context: Context) {
         systemInstructionText: String? = null,
         tools: List<ToolProvider> = emptyList(),
         constrainedDecoding: Boolean = false,
-        enableResponseFormat: Boolean = false,
         topK: Int = 64,
         topP: Double = 0.95,
         temperature: Double = 1.0,
@@ -507,7 +477,6 @@ class LiteRtRuntime(private val context: Context) {
             modelPath = modelPath,
             accelerator = accel,
             maxNumTokens = maxNumTokens,
-            maxNumImages = if (supportImage) maxNumImages.coerceIn(1, 4) else 1,
             supportImage = supportImage,
             supportAudio = supportAudio,
             speculativeDecoding = effectiveSpeculativeDecoding,
@@ -518,7 +487,6 @@ class LiteRtRuntime(private val context: Context) {
         val desiredConversationKey = ConversationKey(
             systemInstructionText = systemInstructionText?.takeIf { it.isNotBlank() },
             constrainedDecoding = constrainedDecoding,
-            enableResponseFormat = enableResponseFormat,
             topK = topK,
             topP = topP,
             temperature = temperature,
@@ -527,7 +495,6 @@ class LiteRtRuntime(private val context: Context) {
             systemInstruction = systemInstruction,
             tools = tools,
             constrainedDecoding = constrainedDecoding,
-            enableResponseFormat = enableResponseFormat,
             topK = topK,
             topP = topP,
             temperature = temperature,
@@ -783,16 +750,13 @@ class LiteRtRuntime(private val context: Context) {
             visionBackend = visionBackend,
             audioBackend = audioBackend,
             maxNumTokens = engineKey.maxNumTokens,
-            maxNumImages = if (engineKey.supportImage) engineKey.maxNumImages else null,
             cacheDir = if (engineKey.modelPath.startsWith("/data/local/tmp"))
                 context.getExternalFilesDir(null)?.absolutePath
             else null,
         )
 
         val engine = withContext(Dispatchers.IO) {
-            // Both flags are read only while constructing the Engine. Native benchmark
-            // counters power exact tok/s telemetry; speculative decoding remains user opt-in.
-            ExperimentalFlags.enableBenchmark = true
+            // The flag dance: set BEFORE constructing the Engine, reset AFTER initialize().
             ExperimentalFlags.enableSpeculativeDecoding = engineKey.speculativeDecoding
             val e = try {
                 Engine(engineConfig).also { built ->
@@ -807,7 +771,6 @@ class LiteRtRuntime(private val context: Context) {
                 }
             } finally {
                 ExperimentalFlags.enableSpeculativeDecoding = false
-                ExperimentalFlags.enableBenchmark = false
             }
             e
         }
@@ -854,7 +817,6 @@ class LiteRtRuntime(private val context: Context) {
                     // wall-clock budget. [LiteRtProvider] republishes the calls as ordinary
                     // tool parts so the normal execution path applies.
                     automaticToolCalling = false,
-                    enableResponseFormat = spec.enableResponseFormat,
                 )
             )
         } finally {
@@ -893,18 +855,12 @@ class LiteRtRuntime(private val context: Context) {
      * Caller MUST have called [ensureLoaded] first. The [mutex] is held for the whole
      * inference so two concurrent callers queue up rather than racing the Conversation.
      */
-    @OptIn(ExperimentalApi::class)
     fun streamTurns(
         history: List<Turn>,
         coldBlob: String,
         images: List<Bitmap> = emptyList(),
         audioClips: List<ByteArray> = emptyList(),
-        visualTokenBudget: Int? = null,
-        repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
-        noRepeatNgramConfig: NoRepeatNgramConfig? = null,
-        maxOutputToken: Int? = null,
-        thinkingConfig: ThinkingConfig? = null,
-        responseFormat: ResponseFormat? = null,
+        onThinking: ((String) -> Unit)? = null,
     ): Flow<StreamEvent> = callbackFlow {
         // GPU-boost the inference. Three levers, in order of effectiveness:
         //   1. PerformanceHintManager (API 33+). Opens a hint session for this thread
@@ -978,11 +934,7 @@ class LiteRtRuntime(private val context: Context) {
             // How many of the message's tool calls have already been forwarded. The SDK
             // re-delivers the full list on each callback, so forward only the new tail.
             var emittedToolCalls = 0
-            // visualTokenBudget is read synchronously by sendMessageAsync. Restore the
-            // process-global experimental flag immediately after submission.
-            ExperimentalFlags.visualTokenBudget = visualTokenBudget
-            try {
-                conv.sendMessageAsync(
+            conv.sendMessageAsync(
                 Contents.of(contentList),
                 object : MessageCallback {
                     override fun onMessage(message: Message) {
@@ -993,9 +945,7 @@ class LiteRtRuntime(private val context: Context) {
                             disarmCrashMarker()
                         }
                         message.channels["thought"]?.let { thinking ->
-                            if (thinking.isNotEmpty()) {
-                                trySend(StreamEvent.Thinking(thinking))
-                            }
+                            if (thinking.isNotEmpty()) onThinking?.invoke(thinking)
                         }
                         val text = message.toString()
                         if (text.isNotEmpty()) {
@@ -1028,25 +978,12 @@ class LiteRtRuntime(private val context: Context) {
                             (firstMessageNs - callStartedNs) / 1_000_000L else 0L
                         val decodeMs = if (firstMessageNs > 0L)
                             (endNs - firstMessageNs) / 1_000_000L else 0L
-                        val benchmarkInfo = runCatching { conv.getBenchmarkInfo() }
-                            .onFailure {
-                                android.util.Log.w(
-                                    "LiteRtRuntime",
-                                    "native benchmark counters unavailable; using char estimate",
-                                    it,
-                                )
-                            }
-                            .getOrNull()
                         lastTelemetry = StreamTelemetry(
                             prefillMs = prefillMs,
                             decodeMs = decodeMs,
                             inputCharCount = telemetryInputChars,
                             outputCharCount = lastCumulative.length,
                             specDecodingEngaged = instance.speculativeDecodingEngaged,
-                            nativePrefillTokenCount = benchmarkInfo?.lastPrefillTokenCount,
-                            nativeDecodeTokenCount = benchmarkInfo?.lastDecodeTokenCount,
-                            nativePrefillTps = benchmarkInfo?.lastPrefillTokensPerSecond,
-                            nativeDecodeTps = benchmarkInfo?.lastDecodeTokensPerSecond,
                         )
                         instance.lastUseAtMs = android.os.SystemClock.elapsedRealtime()
                         generationFinished.set(true)
@@ -1060,17 +997,8 @@ class LiteRtRuntime(private val context: Context) {
                         if (throwable is CancellationException) close() else close(throwable)
                     }
                 },
-                    extraContext = emptyMap(),
-                    repetitionPenaltyConfig = repetitionPenaltyConfig,
-                    noRepeatNgramConfig = noRepeatNgramConfig,
-                    suppressTokensConfig = null,
-                    maxOutputToken = maxOutputToken,
-                    thinkingConfig = thinkingConfig,
-                    responseFormat = responseFormat,
-                )
-            } finally {
-                ExperimentalFlags.visualTokenBudget = null
-            }
+                emptyMap(),
+            )
             awaitClose {
                 // Reached either because the SDK finished (the callbacks close the channel
                 // above) or because the collector went away first: the user hit stop, or

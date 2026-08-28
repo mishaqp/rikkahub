@@ -18,7 +18,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -65,7 +64,6 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.llamacpp.LlamaCppCatalog
 import me.rerere.llamacpp.LlamaCppCatalogEntry
 import me.rerere.locallm.LocalRuntime
-import me.rerere.locallm.LocalRuntimePreferences
 import me.rerere.locallm.litert.LiteRtCatalog
 import me.rerere.locallm.litert.LiteRtCatalogEntry
 import me.rerere.rikkahub.R
@@ -886,11 +884,6 @@ private fun ColumnScope.ProviderConfigureLiteRT(
     val accelerator by vm.accelerator.collectAsStateWithLifecycle()
     val forceCpu by vm.forceCpu.collectAsStateWithLifecycle()
     val maxNumTokensOverride by vm.maxNumTokensOverride.collectAsStateWithLifecycle()
-    val speculativeDecoding by vm.speculativeDecoding.collectAsStateWithLifecycle()
-    val visualTokenBudget by vm.visualTokenBudget.collectAsStateWithLifecycle()
-    val maxNumImages by vm.maxNumImages.collectAsStateWithLifecycle()
-    val repetitionPenalty by vm.repetitionPenalty.collectAsStateWithLifecycle()
-    val noRepeatNgramSize by vm.noRepeatNgramSize.collectAsStateWithLifecycle()
     val crashRecoveryAccel by vm.crashRecoveryAccelerator.collectAsStateWithLifecycle()
     val installedModelFiles by vm.installedModelFiles.collectAsStateWithLifecycle()
     val visionUnavailableSet by vm.visionUnavailableSet.collectAsStateWithLifecycle()
@@ -1095,138 +1088,6 @@ private fun ColumnScope.ProviderConfigureLiteRT(
                 enabled = maxNumTokensOverride != null,
             ) {
                 Text(stringResource(R.string.local_llm_max_tokens_reset))
-            }
-        }
-    }
-
-    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-    Text(
-        stringResource(R.string.local_llm_litert_0161_title),
-        style = MaterialTheme.typography.titleSmall,
-    )
-    Text(
-        stringResource(R.string.local_llm_litert_0161_desc),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                stringResource(R.string.local_llm_speculative_label),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Text(
-                stringResource(R.string.local_llm_speculative_desc),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(
-            checked = speculativeDecoding,
-            onCheckedChange = vm::setSpeculativeDecoding,
-        )
-    }
-
-    Text(
-        stringResource(R.string.local_llm_thinking_native_desc),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            stringResource(R.string.local_llm_visual_budget_label),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            stringResource(R.string.local_llm_visual_budget_desc),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            LocalRuntimePreferences.SUPPORTED_VISUAL_TOKEN_BUDGETS.forEach { budget ->
-                FilterChip(
-                    selected = visualTokenBudget == budget,
-                    onClick = { vm.setVisualTokenBudget(budget) },
-                    label = { Text(budget.toString()) },
-                )
-            }
-        }
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            stringResource(R.string.local_llm_max_images_label),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            stringResource(R.string.local_llm_max_images_desc),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(1, 2, 4).forEach { count ->
-                FilterChip(
-                    selected = maxNumImages == count,
-                    onClick = { vm.setMaxNumImages(count) },
-                    label = { Text(count.toString()) },
-                )
-            }
-        }
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            stringResource(R.string.local_llm_repetition_penalty_label),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            stringResource(R.string.local_llm_repetition_penalty_desc),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(
-                1.0f to "1.0",
-                1.05f to "1.05",
-                1.1f to "1.1",
-                1.2f to "1.2",
-            ).forEach { (value, label) ->
-                FilterChip(
-                    selected = kotlin.math.abs(repetitionPenalty - value) < 0.001f,
-                    onClick = { vm.setRepetitionPenalty(value) },
-                    label = { Text(label) },
-                )
-            }
-        }
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            stringResource(R.string.local_llm_no_repeat_ngram_label),
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            stringResource(R.string.local_llm_no_repeat_ngram_desc),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            listOf(0, 3, 4, 5).forEach { size ->
-                FilterChip(
-                    selected = noRepeatNgramSize == size,
-                    onClick = { vm.setNoRepeatNgramSize(size) },
-                    label = {
-                        Text(
-                            if (size == 0) {
-                                stringResource(R.string.local_llm_control_off)
-                            } else {
-                                size.toString()
-                            }
-                        )
-                    },
-                )
             }
         }
     }

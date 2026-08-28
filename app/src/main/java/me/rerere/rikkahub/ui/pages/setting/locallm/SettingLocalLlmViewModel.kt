@@ -97,39 +97,6 @@ class SettingLocalLlmViewModel(
     val maxNumTokensOverride: StateFlow<Int?> = prefs.maxNumTokensOverrideFlow(runtime)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    /** LiteRT-LM 0.16 controls. Defaults are deliberately conservative; speculative
-     *  decoding is opt-in while the remaining values are neutral/balanced. */
-    val speculativeDecoding: StateFlow<Boolean> = prefs.speculativeDecodingFlow(runtime)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    val visualTokenBudget: StateFlow<Int> = prefs.visualTokenBudgetFlow(runtime)
-        .stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
-            LocalRuntimePreferences.DEFAULT_VISUAL_TOKEN_BUDGET,
-        )
-
-    val maxNumImages: StateFlow<Int> = prefs.maxNumImagesFlow(runtime)
-        .stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
-            LocalRuntimePreferences.DEFAULT_MAX_NUM_IMAGES,
-        )
-
-    val repetitionPenalty: StateFlow<Float> = prefs.repetitionPenaltyFlow(runtime)
-        .stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
-            LocalRuntimePreferences.DEFAULT_REPETITION_PENALTY,
-        )
-
-    val noRepeatNgramSize: StateFlow<Int> = prefs.noRepeatNgramSizeFlow(runtime)
-        .stateIn(
-            viewModelScope,
-            SharingStarted.WhileSubscribed(5_000),
-            LocalRuntimePreferences.DEFAULT_NO_REPEAT_NGRAM_SIZE,
-        )
-
     /** Non-null when the prior process crashed inside the runtime; carries the accelerator
      *  label that crashed so the UI banner can name it. Cleared via [dismissCrashRecovery]. */
     val crashRecoveryAccelerator: StateFlow<String?> = prefs.crashRecoveryFlow(runtime)
@@ -355,26 +322,6 @@ class SettingLocalLlmViewModel(
     /** Set the max-context override. Pass null to clear and revert to the curated default. */
     fun setMaxNumTokensOverride(value: Int?) {
         viewModelScope.launch { prefs.setMaxNumTokensOverride(runtime, value) }
-    }
-
-    fun setSpeculativeDecoding(enabled: Boolean) {
-        viewModelScope.launch { prefs.setSpeculativeDecoding(runtime, enabled) }
-    }
-
-    fun setVisualTokenBudget(value: Int) {
-        viewModelScope.launch { prefs.setVisualTokenBudget(runtime, value) }
-    }
-
-    fun setMaxNumImages(value: Int) {
-        viewModelScope.launch { prefs.setMaxNumImages(runtime, value) }
-    }
-
-    fun setRepetitionPenalty(value: Float) {
-        viewModelScope.launch { prefs.setRepetitionPenalty(runtime, value) }
-    }
-
-    fun setNoRepeatNgramSize(value: Int) {
-        viewModelScope.launch { prefs.setNoRepeatNgramSize(runtime, value) }
     }
 
     /** Clear the "vision unavailable" flag for [fileName] so the next inference attempts the

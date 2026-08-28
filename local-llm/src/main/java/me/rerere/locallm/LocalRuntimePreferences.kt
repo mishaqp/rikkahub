@@ -3,8 +3,6 @@ package me.rerere.locallm
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.floatPreferencesKey
-import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -178,13 +176,6 @@ class LocalRuntimePreferences(private val context: Context) {
          *  the dependency and this value cannot drift: bumping the catalog alone is enough
          *  to invalidate the persisted SDK-coupled decisions on the next launch. */
         val LITERTLM_SDK_VERSION: String = BuildConfig.LITERTLM_SDK_VERSION
-
-        /** LiteRT-LM 0.16 visual budgets accepted by Gemma 4. 280 is the balanced default. */
-        val SUPPORTED_VISUAL_TOKEN_BUDGETS: List<Int> = listOf(70, 140, 280, 560, 1120)
-        const val DEFAULT_VISUAL_TOKEN_BUDGET: Int = 280
-        const val DEFAULT_MAX_NUM_IMAGES: Int = 1
-        const val DEFAULT_REPETITION_PENALTY: Float = 1.0f
-        const val DEFAULT_NO_REPEAT_NGRAM_SIZE: Int = 0
     }
 
     private fun decodeInstalledMap(raw: String?): Map<String, String> {
@@ -240,97 +231,7 @@ class LocalRuntimePreferences(private val context: Context) {
     }
 
     private fun maxNumTokensOverrideKey(runtime: LocalRuntime) =
-        intPreferencesKey("max_tokens_${runtime.displayName}")
-
-    // ---- LiteRT-LM 0.16 generation controls ---------------------------------------
-
-    private fun speculativeDecodingKey(runtime: LocalRuntime) =
-        booleanPreferencesKey("speculative_decoding_${runtime.displayName}")
-
-    private fun visualTokenBudgetKey(runtime: LocalRuntime) =
-        intPreferencesKey("visual_token_budget_${runtime.displayName}")
-
-    private fun maxNumImagesKey(runtime: LocalRuntime) =
-        intPreferencesKey("max_num_images_${runtime.displayName}")
-
-    private fun repetitionPenaltyKey(runtime: LocalRuntime) =
-        floatPreferencesKey("repetition_penalty_${runtime.displayName}")
-
-    private fun noRepeatNgramSizeKey(runtime: LocalRuntime) =
-        intPreferencesKey("no_repeat_ngram_${runtime.displayName}")
-
-    /** Speculative decoding stays opt-in because some Adreno drivers regress during init. */
-    fun speculativeDecodingFlow(runtime: LocalRuntime): Flow<Boolean> =
-        context.localRuntimeDataStore.data.map { it[speculativeDecodingKey(runtime)] ?: false }
-
-    suspend fun speculativeDecoding(runtime: LocalRuntime): Boolean =
-        speculativeDecodingFlow(runtime).first()
-
-    suspend fun setSpeculativeDecoding(runtime: LocalRuntime, enabled: Boolean) {
-        context.localRuntimeDataStore.edit { it[speculativeDecodingKey(runtime)] = enabled }
-    }
-
-    /** Gemma 4 variable-resolution visual token budget. Non-Gemma models ignore it. */
-    fun visualTokenBudgetFlow(runtime: LocalRuntime): Flow<Int> =
-        context.localRuntimeDataStore.data.map { prefs ->
-            prefs[visualTokenBudgetKey(runtime)]
-                ?.takeIf { it in SUPPORTED_VISUAL_TOKEN_BUDGETS }
-                ?: DEFAULT_VISUAL_TOKEN_BUDGET
-        }
-
-    suspend fun visualTokenBudget(runtime: LocalRuntime): Int =
-        visualTokenBudgetFlow(runtime).first()
-
-    suspend fun setVisualTokenBudget(runtime: LocalRuntime, value: Int) {
-        require(value in SUPPORTED_VISUAL_TOKEN_BUDGETS) {
-            "Unsupported visual token budget: $value"
-        }
-        context.localRuntimeDataStore.edit { it[visualTokenBudgetKey(runtime)] = value }
-    }
-
-    /** Upper bound supplied to EngineConfig.maxNumImages; kept small to bound native memory. */
-    fun maxNumImagesFlow(runtime: LocalRuntime): Flow<Int> =
-        context.localRuntimeDataStore.data.map {
-            (it[maxNumImagesKey(runtime)] ?: DEFAULT_MAX_NUM_IMAGES).coerceIn(1, 4)
-        }
-
-    suspend fun maxNumImages(runtime: LocalRuntime): Int = maxNumImagesFlow(runtime).first()
-
-    suspend fun setMaxNumImages(runtime: LocalRuntime, value: Int) {
-        context.localRuntimeDataStore.edit { it[maxNumImagesKey(runtime)] = value.coerceIn(1, 4) }
-    }
-
-    /** 1.0 disables the multiplicative repetition penalty. */
-    fun repetitionPenaltyFlow(runtime: LocalRuntime): Flow<Float> =
-        context.localRuntimeDataStore.data.map {
-            (it[repetitionPenaltyKey(runtime)] ?: DEFAULT_REPETITION_PENALTY)
-                .coerceIn(1.0f, 2.0f)
-        }
-
-    suspend fun repetitionPenalty(runtime: LocalRuntime): Float =
-        repetitionPenaltyFlow(runtime).first()
-
-    suspend fun setRepetitionPenalty(runtime: LocalRuntime, value: Float) {
-        context.localRuntimeDataStore.edit {
-            it[repetitionPenaltyKey(runtime)] = value.coerceIn(1.0f, 2.0f)
-        }
-    }
-
-    /** 0 disables no-repeat n-gram filtering. */
-    fun noRepeatNgramSizeFlow(runtime: LocalRuntime): Flow<Int> =
-        context.localRuntimeDataStore.data.map {
-            (it[noRepeatNgramSizeKey(runtime)] ?: DEFAULT_NO_REPEAT_NGRAM_SIZE)
-                .coerceIn(0, 16)
-        }
-
-    suspend fun noRepeatNgramSize(runtime: LocalRuntime): Int =
-        noRepeatNgramSizeFlow(runtime).first()
-
-    suspend fun setNoRepeatNgramSize(runtime: LocalRuntime, value: Int) {
-        context.localRuntimeDataStore.edit {
-            it[noRepeatNgramSizeKey(runtime)] = value.coerceIn(0, 16)
-        }
-    }
+        androidx.datastore.preferences.core.intPreferencesKey("max_tokens_${runtime.displayName}")
 
     suspend fun forceCpu(runtime: LocalRuntime): Boolean = forceCpuFlow(runtime).first()
 

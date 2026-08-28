@@ -1,9 +1,5 @@
 package me.rerere.locallm.litert
 
-import com.google.ai.edge.litertlm.ResponseFormat
-import kotlinx.serialization.json.Json
-import me.rerere.ai.core.ReasoningLevel
-import me.rerere.ai.provider.CustomBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -175,72 +171,6 @@ class LiteRtEngineContextTokensTest {
         assertTrue(
             "prefill budget ${committedChars}c must fit the engine's ${engine}t",
             committedChars <= engine * 4,
-        )
-    }
-}
-
-
-/** Coverage for LiteRT-LM 0.16.1 generation controls that can be tested without JNI. */
-class LiteRt0161GenerationControlsTest {
-
-    @Test
-    fun `max output token is clamped to engine allocation`() {
-        assertEquals(1024, effectiveMaxOutputToken(1024, 4096))
-        assertEquals(4096, effectiveMaxOutputToken(8000, 4096))
-        assertEquals(null, effectiveMaxOutputToken(null, 4096))
-        assertEquals(null, effectiveMaxOutputToken(0, 4096))
-    }
-
-    @Test
-    fun `thinking follows reasoning level and clamps finite budget`() {
-        val off = liteRtThinkingConfig(true, ReasoningLevel.OFF, 4096)!!
-        assertFalse(off.enableThinking)
-        assertEquals(0, off.thinkingTokenBudget)
-
-        val auto = liteRtThinkingConfig(true, ReasoningLevel.AUTO, 4096)!!
-        assertTrue(auto.enableThinking)
-        assertEquals(-1, auto.thinkingTokenBudget)
-
-        val high = liteRtThinkingConfig(true, ReasoningLevel.HIGH, 4096)!!
-        assertTrue(high.enableThinking)
-        assertEquals(4096, high.thinkingTokenBudget)
-
-        assertEquals(null, liteRtThinkingConfig(false, ReasoningLevel.HIGH, 4096))
-    }
-
-    @Test
-    fun `OpenAI json schema custom body maps to native response format`() {
-        val body = CustomBody(
-            key = "response_format",
-            value = Json.parseToJsonElement(
-                """{"type":"json_schema","json_schema":{"schema":{"type":"object","required":["answer"]}}}"""
-            ),
-        )
-        val format = parseLiteRtResponseFormat(listOf(body))!!
-        assertEquals(ResponseFormat.Type.JSON_OBJECT, format.type)
-        assertTrue(format.schemaOrPattern.contains("\"required\""))
-    }
-
-    @Test
-    fun `regex custom body maps to native response format`() {
-        val body = CustomBody(
-            key = "litert_response_regex",
-            value = kotlinx.serialization.json.JsonPrimitive("(yes|no)"),
-        )
-        val format = parseLiteRtResponseFormat(listOf(body))!!
-        assertEquals(ResponseFormat.Type.REGEX, format.type)
-        assertEquals("(yes|no)", format.schemaOrPattern)
-    }
-
-    @Test
-    fun `visual budget is enabled only for curated Gemma 4 files`() {
-        assertTrue(
-            LiteRtModelDefaults.forModelFile("gemma-4-E2B-it.litertlm")
-                .supportsVisualTokenBudget
-        )
-        assertFalse(
-            LiteRtModelDefaults.forModelFile("Qwen3_1.7B.litertlm")
-                .supportsVisualTokenBudget
         )
     }
 }

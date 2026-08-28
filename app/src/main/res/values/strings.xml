@@ -1704,20 +1704,6 @@
   <string name="local_llm_max_tokens_desc">Override the curated default. The model file\'s KV cache is the hard ceiling — Qwen ekv4096 caps at 4096 regardless. Capable models (Gemma 4 E2B = 32000) benefit from a larger value. Leave blank to use the curated default.</string>
   <string name="local_llm_max_tokens_placeholder">curated default</string>
   <string name="local_llm_max_tokens_reset">Reset</string>
-  <string name="local_llm_litert_0161_title">LiteRT-LM 0.16.1 controls</string>
-  <string name="local_llm_litert_0161_desc">Thinking follows the assistant’s reasoning level, and its token budget is passed to the model natively. The assistant’s max-output setting is also enforced locally. Exact native token/s telemetry is enabled automatically.</string>
-  <string name="local_llm_speculative_label">Speculative decoding</string>
-  <string name="local_llm_speculative_desc">Speeds up supported Gemma 4 files. Opt-in because some Adreno drivers can fail during engine initialization.</string>
-  <string name="local_llm_thinking_native_desc">Native thinking is available only on models marked “Thinking”. Choose Off, Auto, Low, Medium, or High in the assistant’s reasoning setting.</string>
-  <string name="local_llm_visual_budget_label">Gemma 4 visual tokens per image</string>
-  <string name="local_llm_visual_budget_desc">Higher values preserve more image detail but use more context and memory. Other models ignore this control.</string>
-  <string name="local_llm_max_images_label">Maximum images per message</string>
-  <string name="local_llm_max_images_desc">Sets EngineConfig.maxNumImages. Extra attachments are skipped to keep native memory bounded.</string>
-  <string name="local_llm_repetition_penalty_label">Repetition penalty</string>
-  <string name="local_llm_repetition_penalty_desc">1.0 is disabled. Raise gently if a local model loops or repeats phrases.</string>
-  <string name="local_llm_no_repeat_ngram_label">No-repeat n-gram size</string>
-  <string name="local_llm_no_repeat_ngram_desc">Blocks an exact token sequence from recurring. Leave off unless the model is looping.</string>
-  <string name="local_llm_control_off">Off</string>
   <string name="local_llm_crash_recovery_format">Recovered: the local model crashed last session on %1$s — switched to CPU automatically. Tap to dismiss; toggle “Try GPU acceleration” below to retry.</string>
   <string name="local_llm_delete_model">Delete model</string>
   <string name="local_llm_insufficient_memory_format">Need about %1$d MB of free RAM (model is %2$d MB plus runtime headroom) but only %3$d MB is available. Close other apps or pick a smaller model.</string>
