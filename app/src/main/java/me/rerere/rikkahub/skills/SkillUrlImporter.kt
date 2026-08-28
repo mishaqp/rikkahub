@@ -189,7 +189,7 @@ class SkillUrlImporter(
     // openclaw section markers: the `## When to use` / `## Steps` / `## Tools used` headings
     // that distinguish an openclaw skill from arbitrary markdown.
     private val OpenclawMarker =
-        Regex("""(?im)^#{1,6}\s+(when to use|steps|tools used)\b""")
+        Regex("""(?im)^#{1,6}\s+(when to use|steps|tools used)\s*$""")
 
     private fun transcodeFromOpenclaw(raw: String, sourceUrl: String, override: String?): String? {
         // Pull the first H1 as name (if missing, fall back to first non-blank line).
