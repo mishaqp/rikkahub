@@ -774,7 +774,7 @@
   <string name="setting_page_built_in_tools_search_desc">Включить интеграцию с Google Поиском</string>
   <string name="setting_page_built_in_tools_url_context">Контекст URL</string>
   <string name="setting_page_built_in_tools_url_context_desc">Включить обработку содержимого по URL</string>
-  <string name="setting_page_chat_storage">Хранилище чатов</string>
+  <string name="setting_page_chat_storage">Управление хранилищем</string>
   <string name="setting_page_chat_storage_desc">%1$d файлов, %2$.2f МБ</string>
   <string name="setting_page_code_display_settings">Отображение кода</string>
   <string name="setting_page_color_mode">Цветовая схема</string>
@@ -1313,6 +1313,20 @@
   <string name="local_llm_max_tokens_label">Макс. контекст (токены)</string>
   <string name="local_llm_max_tokens_placeholder">курируемое по умолчанию</string>
   <string name="local_llm_max_tokens_reset">Сбросить</string>
+  <string name="local_llm_litert_0150_title">Настройки LiteRT-LM 0.15.0</string>
+  <string name="local_llm_litert_0150_desc">Thinking следует уровню рассуждения ассистента, а его бюджет токенов передаётся модели нативно. Лимит ответа ассистента также применяется локально. Точная нативная телеметрия токенов/с включена автоматически.</string>
+  <string name="local_llm_speculative_label">Спекулятивное декодирование</string>
+  <string name="local_llm_speculative_desc">Ускоряет поддерживаемые файлы Gemma 4. Включается вручную, поскольку на некоторых драйверах Adreno возможен сбой при инициализации движка.</string>
+  <string name="local_llm_thinking_native_desc">Нативный thinking доступен только моделям с меткой «Thinking». Выберите «Выкл.», «Авто», «Низкий», «Средний» или «Высокий» в настройке рассуждений ассистента.</string>
+  <string name="local_llm_visual_budget_label">Визуальные токены Gemma 4 на изображение</string>
+  <string name="local_llm_visual_budget_desc">Большее значение сохраняет больше деталей, но расходует больше контекста и памяти. Другие модели игнорируют эту настройку.</string>
+  <string name="local_llm_max_images_label">Максимум изображений в сообщении</string>
+  <string name="local_llm_max_images_desc">Задаёт EngineConfig.maxNumImages. Лишние вложения пропускаются, чтобы ограничить расход нативной памяти.</string>
+  <string name="local_llm_repetition_penalty_label">Штраф за повторения</string>
+  <string name="local_llm_repetition_penalty_desc">1.0 — выключено. Немного увеличьте, если локальная модель зацикливается или повторяет фразы.</string>
+  <string name="local_llm_no_repeat_ngram_label">Размер неповторяемой n-граммы</string>
+  <string name="local_llm_no_repeat_ngram_desc">Запрещает повтор точной последовательности токенов. Оставьте выключенным, если модель не зацикливается.</string>
+  <string name="local_llm_control_off">Выкл.</string>
   <string name="local_llm_re_detect">Заново определить ускоритель</string>
   <string name="local_llm_rename">Переименовать</string>
   <string name="local_llm_rename_label">Отображаемое имя</string>
@@ -1862,5 +1876,7 @@
     <string name="chat_generation_network_timeout">Тайм-аут соединения</string>
     <string name="chat_generation_network_unreachable">Не удается подключиться к серверу</string>
     <string name="chat_generation_network_disconnected">Сетевое соединение потеряно</string>
+  <string name="setting_files_page_clean_all">Все файлы</string>
+  <string name="setting_files_page_clean_older_than_days">Старше %1$d дней</string>
+  <string name="setting_files_page_clean_range_description">Выберите файлы для окончательного удаления. Это действие нельзя отменить.</string>
 </resources>
-

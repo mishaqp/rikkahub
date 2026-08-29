@@ -4,7 +4,12 @@ import android.util.Log
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import me.rerere.ai.core.MessageRole
+import me.rerere.ai.core.ReasoningLevel
+import me.rerere.ai.provider.CustomBody
 import me.rerere.ai.provider.ImageGenerationParams
 import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.Provider
@@ -21,6 +26,10 @@ import me.rerere.ai.util.audioBytes
 import me.rerere.ai.util.toBitmap
 import me.rerere.locallm.LocalRuntime
 import me.rerere.locallm.LocalRuntimePreferences
+import com.google.ai.edge.litertlm.NoRepeatNgramConfig
+import com.google.ai.edge.litertlm.RepetitionPenaltyConfig
+import com.google.ai.edge.litertlm.ResponseFormat
+import com.google.ai.edge.litertlm.ThinkingConfig
 import com.google.ai.edge.litertlm.tool as litertTool
 import com.google.ai.edge.litertlm.ToolProvider
 
@@ -58,6 +67,63 @@ internal fun decideImageForwarding(
     forwardImages = visionEnabledPostLoad,
     noteImagesDropped = userSentImages && modelImageCapable && !visionEnabledPostLoad,
 )
+
+/** Clamp the host's output-only token limit to the engine's total KV-cache allocation. */
+internal fun effectiveMaxOutputToken(requested: Int?, engineMaxTokens: Int): Int? =
+    requested?.takeIf { it > 0 }?.coerceAtMost(engineMaxTokens.coerceAtLeast(1))
+
+/** Translate RikkaHub's existing reasoning level into LiteRT-LM 0.15 native thinking config. */
+internal fun liteRtThinkingConfig(
+    supportsThinking: Boolean,
+    reasoningLevel: ReasoningLevel,
+    engineMaxTokens: Int,
+): ThinkingConfig? {
+    if (!supportsThinking) return null
+    val enabled = reasoningLevel.isEnabled
+    val budget = when {
+        !enabled -> 0
+        reasoningLevel.budgetTokens < 0 -> -1
+        else -> reasoningLevel.budgetTokens.coerceAtMost(engineMaxTokens.coerceAtLeast(1))
+    }
+    return ThinkingConfig(enableThinking = enabled, thinkingTokenBudget = budget)
+}
+
+/**
+ * Parse an explicitly requested structured-output format from the existing custom-body UI.
+ * Supported forms:
+ *  - OpenAI-compatible response_format={type:"json_schema",json_schema:{schema:{...}}}
+ *  - response_format={type:"json_object"}
+ *  - litert_response_regex="..."
+ */
+internal fun parseLiteRtResponseFormat(customBody: List<CustomBody>): ResponseFormat? {
+    val regex = customBody.lastOrNull { it.key == "litert_response_regex" }
+        ?.value
+        ?.let { it as? JsonPrimitive }
+        ?.contentOrNull
+        ?.takeIf { it.isNotBlank() }
+    if (regex != null) return ResponseFormat.regex(regex)
+
+    val root = customBody.lastOrNull { it.key == "response_format" }
+        ?.value as? JsonObject ?: return null
+    val type = (root["type"] as? JsonPrimitive)?.contentOrNull
+    return when (type) {
+        "json_schema" -> {
+            val envelope = root["json_schema"] as? JsonObject
+            val schema = envelope?.get("schema") ?: root["schema"] ?: return null
+            ResponseFormat.json(schema.toString())
+        }
+        "json_object" -> {
+            val schema = root["schema"]?.toString() ?: """{"type":"object"}"""
+            ResponseFormat.json(schema)
+        }
+        "regex" -> {
+            val pattern = (root["pattern"] as? JsonPrimitive)?.contentOrNull
+                ?.takeIf { it.isNotBlank() } ?: return null
+            ResponseFormat.regex(pattern)
+        }
+        else -> null
+    }
+}
 
 /**
  * Implements the existing Provider interface so any assistant can pick a LiteRT
@@ -365,6 +431,33 @@ class LiteRtProvider(
             config.visionAccelerator != null &&
             !visionPersistentlyUnavailable
 
+        // ---- LiteRT-LM 0.15 per-call controls ---------------------------------------
+        // The file itself is authoritative: Capabilities.hasSpeculativeDecodingSupport()
+        // is checked by the runtime, so compatible custom files work too.
+        val speculativeDecoding = prefs.speculativeDecoding(LocalRuntime.LiteRT)
+        val maxNumImages = prefs.maxNumImages(LocalRuntime.LiteRT)
+        val visualTokenBudget = prefs.visualTokenBudget(LocalRuntime.LiteRT)
+            .takeIf { config.supportsVisualTokenBudget }
+        val repetitionPenalty = prefs.repetitionPenalty(LocalRuntime.LiteRT)
+        val noRepeatNgramSize = prefs.noRepeatNgramSize(LocalRuntime.LiteRT)
+        val repetitionPenaltyConfig = repetitionPenalty
+            .takeIf { it > 1.0f }
+            ?.let { RepetitionPenaltyConfig(repetitionPenalty = it) }
+        val noRepeatNgramConfig = noRepeatNgramSize
+            .takeIf { it > 0 }
+            ?.let { NoRepeatNgramConfig(noRepeatNgramSize = it) }
+        val maxOutputToken = effectiveMaxOutputToken(params.maxTokens, effectiveMaxNumTokens)
+        val thinkingConfig = liteRtThinkingConfig(
+            supportsThinking = config.supportsThinking,
+            reasoningLevel = params.reasoningLevel,
+            engineMaxTokens = maxOutputToken ?: effectiveMaxNumTokens,
+        )
+        val requestedResponseFormat = parseLiteRtResponseFormat(params.customBody)
+        val responseFormat = requestedResponseFormat.takeIf { params.tools.isEmpty() }
+        if (requestedResponseFormat != null && responseFormat == null) {
+            Log.w(TAG, "response_format ignored while tools are enabled; tool grammar wins")
+        }
+
         // ---- Engine load with full per-model + per-call config ----
         val outcome = try {
             runtime.ensureLoaded(
@@ -372,15 +465,12 @@ class LiteRtProvider(
                 preferredAccel = cachedAccel,
                 forceCpu = forceCpu,
                 maxNumTokens = effectiveMaxNumTokens,
+                maxNumImages = maxNumImages,
                 supportImage = effectiveSupportImage,
                 supportAudio = config.supportsAudio,
-                // Match Google AI Edge Gallery: speculative decoding is an explicit user
-                // opt-in (their `ConfigKeys.ENABLE_SPECULATIVE_DECODING` defaults to false).
-                // Forcing it on whenever the model file supports it has been a candidate
-                // contributor to GPU init regressions on Adreno-class devices; matching
-                // Gallery removes that variable. Re-enable if/when we expose a settings
-                // toggle and the user explicitly opts in.
-                speculativeDecoding = false,
+                // Opt-in only. The runtime asks the file's Capabilities object before Engine
+                // creation, so unsupported files remain on ordinary decoding.
+                speculativeDecoding = speculativeDecoding,
                 visionAccelerator = config.visionAccelerator ?: "gpu",
                 systemInstructionText = combinedSystem.ifBlank { null },
                 tools = nativeTools,
@@ -389,10 +479,12 @@ class LiteRtProvider(
                 // call grammar so Gemma actually invokes runTool(...) via the bridge
                 // instead of producing free-form "I can't do that" text. OFF for plain
                 // chat turns to avoid biasing normal language.
-                constrainedDecoding = params.tools.isNotEmpty(),
+                constrainedDecoding = nativeTools.isNotEmpty(),
+                enableResponseFormat = responseFormat != null,
                 topK = config.topK,
-                topP = config.topP,
-                temperature = config.temperature,
+                topP = params.topP?.toDouble()?.coerceIn(0.0, 1.0) ?: config.topP,
+                temperature = params.temperature?.toDouble()?.coerceAtLeast(0.0)
+                    ?: config.temperature,
             )
         } catch (corrupt: LiteRtModelCorruptException) {
             handleCorruptModel(corrupt)
@@ -439,6 +531,9 @@ class LiteRtProvider(
         // matching the old positional-append merge behaviour.
         val textId = "$streamId-text"
         var previousCumulative = ""
+        var previousThinking = ""
+        var reasoningStarted = false
+        val reasoningId = "$streamId-reasoning"
         val fullResponseBuilder = StringBuilder()
 
         // Extract images + audio from the LAST USER message only (the new turn). Earlier
@@ -460,8 +555,16 @@ class LiteRtProvider(
             visionEnabledPostLoad = outcome.visionEnabled,
             userSentImages = userImageParts.isNotEmpty(),
         )
+        val selectedImageParts = userImageParts.take(maxNumImages)
+        if (userImageParts.size > selectedImageParts.size) {
+            Log.w(
+                TAG,
+                "dropping ${userImageParts.size - selectedImageParts.size} image(s): " +
+                    "maxNumImages=$maxNumImages",
+            )
+        }
         val turnImages: List<android.graphics.Bitmap> = if (imageDecision.forwardImages) {
-            userImageParts.mapNotNull { it.toBitmap(context) }
+            selectedImageParts.mapNotNull { it.toBitmap(context) }
         } else {
             // Vision unavailable / not supported by this model — drop image parts. When the
             // user actually attached images to a vision-capable model, the note below tells
@@ -504,6 +607,12 @@ class LiteRtProvider(
                     coldBlob = coldBlob,
                     images = turnImages,
                     audioClips = turnAudio,
+                    visualTokenBudget = visualTokenBudget.takeIf { outcome.visionEnabled },
+                    repetitionPenaltyConfig = repetitionPenaltyConfig,
+                    noRepeatNgramConfig = noRepeatNgramConfig,
+                    maxOutputToken = maxOutputToken,
+                    thinkingConfig = thinkingConfig,
+                    responseFormat = responseFormat,
                 ).collect { event ->
                     when (event) {
                         is StreamEvent.Delta -> {
@@ -524,6 +633,23 @@ class LiteRtProvider(
 
                             if (delta.isNotEmpty()) {
                                 emit(StreamChunk.TextDelta(textId, delta))
+                            }
+                        }
+
+                        is StreamEvent.Thinking -> {
+                            val cumulative = event.cumulative
+                            val delta = if (cumulative.startsWith(previousThinking)) {
+                                cumulative.substring(previousThinking.length)
+                            } else {
+                                cumulative
+                            }
+                            previousThinking = cumulative
+                            if (!reasoningStarted) {
+                                emit(StreamChunk.ReasoningStart(reasoningId))
+                                reasoningStarted = true
+                            }
+                            if (delta.isNotEmpty()) {
+                                emit(StreamChunk.ReasoningDelta(reasoningId, delta))
                             }
                         }
 
@@ -551,6 +677,9 @@ class LiteRtProvider(
                 throw translateSdkError(t, effectiveMaxNumTokens)
             }
         }
+        if (reasoningStarted) {
+            emit(StreamChunk.ReasoningEnd(reasoningId))
+        }
 
         // ---- Persist tok/s telemetry --------------------------------------------------
         // After a clean stream the runtime stamps lastTelemetry with prefill / decode
@@ -561,7 +690,7 @@ class LiteRtProvider(
             // Only persist samples with non-trivial timings — a zero-decode case would
             // be the SDK emitting no tokens, which is already a bug we want to see
             // elsewhere; persisting tps=0 muddies the rolling average.
-            if (tele.decodeMs > 100 && tele.outputCharCount > 0) {
+            if (tele.outputTokenCount > 0 && (tele.hasNativeBenchmark || tele.decodeMs > 100)) {
                 runCatching {
                     prefs.setPerfTelemetry(
                         LocalRuntime.LiteRT,
@@ -577,8 +706,9 @@ class LiteRtProvider(
                 Log.i(
                     TAG,
                     "telemetry: prefill=${"%.2f".format(tele.prefillTps)} tok/s decode=${"%.2f".format(tele.decodeTps)} tok/s " +
-                        "(prefillMs=${tele.prefillMs} decodeMs=${tele.decodeMs} inChars=${tele.inputCharCount} outChars=${tele.outputCharCount} " +
-                        "specDecoding=${tele.specDecodingEngaged})",
+                        "(prefillMs=${tele.prefillMs} decodeMs=${tele.decodeMs} " +
+                        "inTokens=${tele.inputTokenCount} outTokens=${tele.outputTokenCount} " +
+                        "native=${tele.hasNativeBenchmark} specDecoding=${tele.specDecodingEngaged})",
                 )
             }
         }
